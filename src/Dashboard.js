@@ -64,7 +64,9 @@ const Dashboard = () => {
               <td className="p-3 border">{machine.network}</td>
               <td className="p-3 border">{machine.ram}</td>
               <td className="p-3 border">{machine.cpu}</td>
-              <td className={`p-3 border font-semibold ${machine.status === "Running" ? "text-green-500" : "text-red-500"}`}>{machine.status}</td>
+              <td className={`p-3 border font-semibold ${machine.status === "Running" ? "text-green-500" : "text-red-500"}`}>
+                {machine.status}
+              </td>
               <td className="p-3 border">{machine.date}</td>
               <td className="p-3 border">{machine.ipAddress}:{machine.port}</td>
               <td className="p-3 border">
