@@ -10,18 +10,22 @@ export default function Formulaire() {
   const [submitted, setSubmitted] = useState(false);
   const [ipAddress, setIpAddress] = useState("");
   const [port, setPort] = useState("");
+  const Formulaire = () => {
+    const location = useLocation();
+    const navigate = useNavigate();
+    const mode = location.state?.mode || "local"; // Valeur par défaut "local"
+  
+    return (
+      <div style={{ textAlign: "center", padding: "50px" }}>
+        <h1>Formulaire pour {mode === "local" ? "Local Mode" : "Distant Mode"}</h1>
+        <button onClick={() => navigate("/")}>Retour</button>
+      </div>
+    );
+  };
 
   const navigate = useNavigate();
 
-  const generateIpAddress = () => {
-    return `192.168.1.${Math.floor(Math.random() * 100) + 1}`;
-  };
-
-  const generatePort = () => {
-    return Math.floor(Math.random() * (65535 - 2000) + 2000).toString();
-  };
-
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
 
     if (!hostname.trim()) {
@@ -29,31 +33,56 @@ export default function Formulaire() {
       return;
     }
 
-    const newIp = generateIpAddress();
-    const newPort = generatePort();
-
-    const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];
-
-    const newMachine = {
-      hostname,
-      box,
-      ram: `${ram} GB`,
-      cpu: `${cpu} vCPUs`,
-      network,
-      status: "Running",
-      date: new Date().toLocaleDateString(),
-      ipAddress: newIp,
-      port: newPort,
+    const requestData = {
+      hostname: hostname,
+      box: box,
+      ram: ram,
+      cpu: cpu,
+      network: network
     };
 
-    const updatedMachines = [...storedMachines, newMachine];
+    try {
+      const response = await fetch("http://localhost:5000/create_vm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestData),
+      });
 
-    localStorage.setItem("vms", JSON.stringify(updatedMachines));
-    window.dispatchEvent(new Event("storage"));
+      const data = await response.json();
 
-    setIpAddress(newIp);
-    setPort(newPort);
-    setSubmitted(true);
+      if (response.ok) {
+        // Récupère l'IP et le port réels renvoyés par le backend
+        setIpAddress(data.ipAddress);
+        setPort(data.port);
+        setSubmitted(true);
+
+        // Créer l'objet machine avec les infos complètes
+        const newMachine = {
+          hostname: hostname,
+          box: box,
+          network: network,
+          ram: `${ram} GB`,
+          cpu: `${cpu} vCPUs`,
+          status: "Running",
+          date: new Date().toLocaleDateString(),
+          ipAddress: data.ipAddress,
+          port: data.port
+        };
+
+        // Sauvegarde dans le localStorage
+        const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];
+        const updatedMachines = [...storedMachines, newMachine];
+        localStorage.setItem("vms", JSON.stringify(updatedMachines));
+
+        // Notifier d'un changement (pour que le Dashboard se mette à jour)
+        window.dispatchEvent(new Event("storage"));
+      } else {
+        alert(`❌ Erreur: ${data.error}`);
+      }
+    } catch (error) {
+      console.error("Erreur de requête:", error);
+      alert("Erreur lors de la communication avec le serveur.");
+    }
   };
 
   return (
@@ -136,7 +165,7 @@ export default function Formulaire() {
         <div className="success-message text-center mt-6">
           <h2 className="text-2xl font-bold text-teal-600">✅ Machine created successfully!</h2>
           <p className="text-lg text-gray-700">SSH address: {ipAddress}:{port}</p>
-          <p className="text-gray-600">22 (guest) =&gt; {port} (host)</p>
+          <p className="text-gray-600">Utilisez cette adresse pour vous connecter via SSH.</p>
         </div>
       )}
     </div>
