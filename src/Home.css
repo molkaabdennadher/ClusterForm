@@ -1,0 +1,66 @@
+/* Style global */
+.home-container {
+  text-align: center;
+  padding: 50px;
+  background-color: #f0f8ff; /* Bleu clair */
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Titre principal */
+.home-title {
+  font-size: 48px;
+  font-weight: bold;
+  color: #008080; /* Bleu-vert */
+  margin-bottom: 10px;
+}
+
+/* Sous-titre */
+.home-subtitle {
+  font-size: 20px;
+  color: #004d40;
+  margin-bottom: 20px;
+}
+
+/* Conteneur des boutons radio */
+.radio-group {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 30px;
+}
+
+/* Label des boutons radio */
+.radio-label {
+  font-size: 18px;
+  color: #004d40;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Bouton radio personnalisé */
+.radio-input {
+  width: 18px;
+  height: 18px;
+  accent-color: #008080; /* Changer la couleur du bouton sélectionné */
+}
+
+/* Bouton de connexion */
+.connect-button {
+  background-color: #008080;
+  color: white;
+  font-size: 18px;
+  padding: 12px 24px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: 0.3s;
+}
+
+.connect-button:hover {
+  background-color: #006666;
+}

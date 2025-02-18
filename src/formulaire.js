@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useState } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 
 export default function Formulaire() {
   const [hostname, setHostname] = useState("");
@@ -12,6 +12,9 @@ export default function Formulaire() {
   const [port, setPort] = useState("");
 
   const navigate = useNavigate();
+  const location = useLocation();
+  const remoteConfig = location.state || {};
+  const isRemote = remoteConfig.mode === "distant";
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -29,22 +32,30 @@ export default function Formulaire() {
       network: network
     };
 
+    if (isRemote) {
+      requestData.remote_ip = remoteConfig.remote_ip;
+      requestData.remote_password = remoteConfig.remote_password;
+      requestData.remote_user = remoteConfig.remote_user; // Transmet le login reçu depuis DistantConfig
+      requestData.remote_os = remoteConfig.remote_os;
+      requestData.hypervisor = remoteConfig.hypervisor;
+    }
+
     try {
-      const response = await fetch("http://localhost:5000/create-vm", {
+      const endpoint = isRemote
+        ? "http://localhost:5000/create-vm-remote"
+        : "http://localhost:5000/create-vm";
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestData),
       });
-
       const data = await response.json();
 
       if (response.ok) {
-        // Récupère l'IP et le port réels renvoyés par le backend
         setIpAddress(data.ipAddress);
         setPort(data.port);
         setSubmitted(true);
 
-        // Créer l'objet machine avec les infos complètes
         const newMachine = {
           hostname: hostname,
           box: box,
@@ -57,12 +68,9 @@ export default function Formulaire() {
           port: data.port
         };
 
-        // Sauvegarde dans le localStorage
         const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];
         const updatedMachines = [...storedMachines, newMachine];
         localStorage.setItem("vms", JSON.stringify(updatedMachines));
-
-        // Notifier d'un changement (pour que le Dashboard se mette à jour)
         window.dispatchEvent(new Event("storage"));
       } else {
         alert(`❌ Erreur: ${data.error}`);
@@ -83,7 +91,9 @@ export default function Formulaire() {
           Dashboard
         </button>
       </div>
-      <h1 className="text-4xl font-bold text-teal-600 mb-6">Create a Virtual Machine</h1>
+      <h1 className="text-4xl font-bold text-teal-600 mb-6">
+        Create a Virtual Machine ({isRemote ? "Distant Mode" : "Local Mode"})
+      </h1>
       {!submitted ? (
         <form onSubmit={handleSubmit} className="bg-white p-6 rounded-lg shadow-lg w-96">
           <label className="block text-sm font-medium">Host name:</label>
