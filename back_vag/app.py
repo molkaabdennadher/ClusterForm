@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import subprocess
 import os
 import paramiko
-
+import traceback
 import random
 from flask import render_template
 from flask_cors import CORS  # Import de flask-cors
@@ -87,134 +87,165 @@ end
         return jsonify({"error": str(e)}), 500
 
 # Endpoint pour créer la VM en mode distant via Paramiko
-@app.route('/create-vm-remote', methods=['POST'])
+@app.route("/create-vm-remote", methods=["POST"])
 def create_vm_remote():
+    """
+    Crée une VM sur une machine distante (Windows ou Linux) via SSH + Vagrant + VirtualBox,
+    puis copie le Vagrantfile sur la machine source.
+    """
     try:
         data = request.get_json()
-        # Récupération des paramètres envoyés par le front-end
-        ip = data.get('remote_ip')
-        ssh_username = data.get('remote_user')
-        ssh_password = data.get('remote_password')
-        remote_os = data.get('remote_os', 'Windows').lower()  # Par défaut "windows"
-        hypervisor = data.get('hypervisor', 'VirtualBox')  # Actuellement non utilisé
 
-        # 1. Établir la connexion SSH
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(ip, username=ssh_username, password=ssh_password)
-        print("conxx ssh établie")
+        # ------------------- Paramètres de connexion SSH -------------------
+        remote_ip = data.get('remote_ip')
+        remote_user = data.get('remote_user')
+        remote_password = data.get('remote_password')
+        remote_os = data.get('remote_os', 'Windows').lower()
 
-        # 2. Récupérer le hostname de la machine distante (pour nommer la VM)
-        stdin, stdout, stderr = client.exec_command("hostname")
-        hostname = stdout.read().decode().strip()
-        if not hostname:
-            hostname = ssh_username  # Si le hostname n'est pas disponible
-        print("DEBUG - Hostname:", hostname)
+        # ------------------- Paramètres de la VM -------------------
+        vm_name = data.get("vm_name", "DefaultVM")
+        box = data.get("box", "ubuntu/bionic64")
+        ram = float(data.get("ram", 1))  # en GB
+        cpu = int(data.get("cpu", 1))
+        network = data.get("network", "NAT")
 
-        # 3. Ouvrir une session SFTP et déterminer le répertoire de travail
-        sftp = client.open_sftp()
-        if remote_os == 'windows':
-            # Sous Windows, sftp.getcwd() retourne généralement le dossier personnel
-            current_dir = sftp.getcwd()
-            if not current_dir or current_dir == '':
-                current_dir = '.'
-            # Commande pour lancer Vagrant sur Windows (cd /d pour changer de disque si besoin)
-            vagrant_command = f'cd /d "{current_dir}" && vagrant up'
-        else:
-            # Sous Linux, on se base sur /home/<ssh_username>
-            current_dir = f"/home/{ssh_username}"
-            try:
-                sftp.chdir(current_dir)
-            except IOError:
-                sftp.mkdir(current_dir)
-            vagrant_command = f'cd {current_dir} && vagrant up'
+        if not vm_name:
+            return jsonify({"error": "vm_name is required"}), 400
 
-        print("DEBUG - Current directory:", current_dir)
-        try:
-            listing = sftp.listdir(current_dir)
-            print("DEBUG - Listing of current_dir:", listing)
-        except Exception as e:
-            print("DEBUG - Impossible de lister le répertoire :", e)
+        memory_mb = int(ram * 1024)
 
-        # 4. Préparer le contenu du Vagrantfile avec le hostname
+        # Configuration réseau
+        network_config = ""
+        ip_address_generated = ""
+        if network != "NAT":
+            ip_address_generated = f"192.168.56.{random.randint(2,254)}"
+            network_config = f'  config.vm.network "private_network", ip: "{ip_address_generated}"\n'
+
+        # ------------------- Construction du Vagrantfile -------------------
         vagrantfile_content = f"""Vagrant.configure("2") do |config|
   config.vm.box = "{box}"
   config.vm.hostname = "{vm_name}"
 {network_config}  config.vm.provider "virtualbox" do |vb|
     vb.name = "{vm_name}"
     vb.memory = "{memory_mb}"
-    vb.cpus = "{cpu}"
+    vb.cpus = {cpu}
   end
 end
 """
 
-        # 5. Écrire le Vagrantfile dans le répertoire courant
-        remote_vagrantfile_path = f"{current_dir}/Vagrantfile" if not current_dir.endswith("/") else f"{current_dir}Vagrantfile"
+        # ------------------- 1) Connexion SSH -------------------
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(remote_ip, username=remote_user, password=remote_password)
+        print("Connexion SSH établie avec la machine distante.")
+
+        sftp = client.open_sftp()
+
+        # ------------------- 2) Aller dans le home_dir -------------------
+        if remote_os == 'windows':
+            home_dir = sftp.getcwd() or '.'
+        else:
+            home_dir = f"/home/{remote_user}"
+            try:
+                sftp.chdir(home_dir)
+            except IOError:
+                sftp.mkdir(home_dir)
+                sftp.chdir(home_dir)
+
+        # ------------------- 3) Créer/Aller dans le dossier "vms" -------------------
+        try:
+            sftp.chdir("vms")
+        except IOError:
+            sftp.mkdir("vms")
+            sftp.chdir("vms")
+
+        # ------------------- 4) Créer/Aller dans le dossier <vm_name> -------------------
+        try:
+            sftp.chdir(vm_name)
+        except IOError:
+            sftp.mkdir(vm_name)
+            sftp.chdir(vm_name)
+
+        # On est maintenant dans le dossier de la VM sur la machine distante
+        remote_vm_folder = sftp.getcwd()
+        print(f"DEBUG - Dossier de la VM sur la machine distante : {remote_vm_folder}")
+
+        # ------------------- 5) Écrire le Vagrantfile -------------------
+        remote_vagrantfile_path = "Vagrantfile"  # dans le dossier courant
         with sftp.open(remote_vagrantfile_path, 'w') as remote_file:
             remote_file.write(vagrantfile_content)
         print("DEBUG - Vagrantfile écrit dans", remote_vagrantfile_path)
 
-        # 6. Exécuter la commande "vagrant up" pour créer la VM
-        stdin, stdout, stderr = client.exec_command(vagrant_command)
-        stdout_result = stdout.read().decode()
-        stderr_result = stderr.read().decode()
-        if stderr_result.strip():
+        # ------------------- 6) Exécuter 'vagrant up' -------------------
+        if remote_os == 'windows':
+            # Si le chemin commence par "/", on le retire
+            folder = remote_vm_folder.lstrip("/")
+            command_vagrant_up = f'cd /d "{folder}" && vagrant up'
+        else:
+            command_vagrant_up = f'cd "{remote_vm_folder}" && vagrant up'
+
+        stdin, stdout, stderr = client.exec_command(command_vagrant_up)
+        out_up = stdout.read().decode('utf-8', errors='replace')
+        err_up = stderr.read().decode('utf-8', errors='replace')
+        if err_up.strip():
             sftp.close()
             client.close()
-            return jsonify({"error": stderr_result}), 500
-        print("DEBUG - Vagrant up result:", stdout_result)
+            return jsonify({"error": err_up}), 500
+        print("DEBUG - vagrant up result:", out_up)
 
-        # 7. Récupérer l'état de la VM via "vagrant status"
-        status_command = f'cd "{current_dir}" && vagrant status'
-        stdin, stdout, stderr = client.exec_command(status_command)
-        vm_status = stdout.read().decode()
-        status_err = stderr.read().decode()
-        if status_err.strip():
-            vm_status += "\nErreurs: " + status_err
-        print("DEBUG - Vagrant status:", vm_status)
+        # ------------------- 7) Récupérer l'état de la VM -------------------
+        command_status = f'cd "{remote_vm_folder}" && vagrant status'
+        stdin, stdout, stderr = client.exec_command(command_status)
+        vm_status = stdout.read().decode('utf-8', errors='replace') + stderr.read().decode('utf-8', errors='replace')
 
-        # 8. Copier le Vagrantfile dans le dossier "vms" sur la machine distante
-        # Définir le chemin du dossier "vms" dans le répertoire courant
-        vms_folder = f"{current_dir}/vms" if not current_dir.endswith("/") else f"{current_dir}vms"
-        try:
-            sftp.chdir(vms_folder)
-        except IOError:
-            # Le dossier n'existe pas, on le crée
-            try:
-                sftp.mkdir(vms_folder)
-                print("DEBUG - Dossier 'vms' créé dans", current_dir)
-            except Exception as mkdir_error:
-                print("DEBUG - Échec de la création du dossier 'vms':", mkdir_error)
-                # Vous pouvez décider de renvoyer une erreur ici si c'est critique
-        # Copier le fichier Vagrantfile dans le dossier "vms" avec un nom basé sur le hostname
-        dest_vagrantfile = f"{vms_folder}/{hostname}_Vagrantfile"
-        try:
-            with sftp.open(remote_vagrantfile_path, 'r') as source_file:
-                file_data = source_file.read()
-            with sftp.open(dest_vagrantfile, 'w') as dest_file:
-                dest_file.write(file_data)
-            print("DEBUG - Vagrantfile copié vers", dest_vagrantfile)
-        except Exception as copy_error:
-            print("DEBUG - Échec de la copie du Vagrantfile:", copy_error)
+        # ------------------- 8) Récupérer l'IP/Port si NAT -------------------
+        ip_address = ""
+        port = ""
+        if network == "NAT":
+            command_ssh_config = f'cd "{remote_vm_folder}" && vagrant ssh-config'
+            stdin, stdout, stderr = client.exec_command(command_ssh_config)
+            ssh_config = stdout.read().decode('utf-8', errors='replace')
+            for line in ssh_config.splitlines():
+                if line.strip().startswith("HostName"):
+                    ip_address = line.strip().split()[1]
+                if line.strip().startswith("Port"):
+                    port = line.strip().split()[1]
+        else:
+            ip_address = ip_address_generated
+            port = "22"
 
-        # 9. Fermer la connexion SFTP et SSH
+        # ------------------- 9) Copier le Vagrantfile sur la machine source -------------------
+        local_vm_folder = os.path.join("vms_local", vm_name)
+        os.makedirs(local_vm_folder, exist_ok=True)
+        local_vagrantfile_path = os.path.join(local_vm_folder, "Vagrantfile")
+
+        with sftp.open(remote_vagrantfile_path, 'rb') as remote_vf:
+            vagrant_data = remote_vf.read()
+
+        with open(local_vagrantfile_path, 'wb') as local_vf:
+            local_vf.write(vagrant_data)
+
+        print(f"DEBUG - Vagrantfile copié localement dans : {local_vagrantfile_path}")
+
+        # ------------------- 10) Fermer les connexions -------------------
         sftp.close()
         client.close()
 
-        # 10. Retourner dans la réponse JSON les infos de la VM
-        response = {
-            "message": "VM created successfully!",
-            "vm_folder_path": current_dir,
-            "remote_ip": ip,
-            "hostname": hostname,
-            "vm_status": vm_status
-        }
-        return jsonify(response)
+        # ------------------- 11) Réponse JSON -------------------
+        return jsonify({
+            "message": f"VM {vm_name} created remotely",
+            "vm_name": vm_name,
+            "remote_vm_folder": remote_vm_folder,
+            "ipAddress": ip_address,
+            "port": port,
+            "vm_status": vm_status,
+            "local_vagrantfile": os.path.abspath(local_vagrantfile_path)
+        }), 200
 
     except Exception as e:
-        print("DEBUG - Exception dans create_vm_remote:")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True)
