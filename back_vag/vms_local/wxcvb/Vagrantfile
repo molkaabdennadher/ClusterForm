@@ -1,0 +1,9 @@
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/trusty64"
+  config.vm.hostname = "wxcvb"
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "wxcvb"
+    vb.memory = "2048"
+    vb.cpus = 1
+  end
+end

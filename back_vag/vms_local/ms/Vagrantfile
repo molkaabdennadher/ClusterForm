@@ -1,8 +1,8 @@
 Vagrant.configure("2") do |config|
   config.vm.box = "ubuntu/trusty64"
-  config.vm.hostname = "bonjour"
+  config.vm.hostname = "ms"
   config.vm.provider "virtualbox" do |vb|
-    vb.name = "bonjour"
+    vb.name = "ms"
     vb.memory = "2048"
     vb.cpus = 1
   end

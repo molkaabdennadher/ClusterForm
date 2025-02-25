@@ -35,6 +35,7 @@ export default function Formulaire() {
     if (isRemote) {
       requestData.remote_ip = remoteConfig.remote_ip;
       requestData.remote_password = remoteConfig.remote_password;
+      requestData.mail = remoteConfig.mail; 
       requestData.remote_user = remoteConfig.remote_user; // Transmet le login reçu depuis DistantConfig
       requestData.remote_os = remoteConfig.remote_os;
       requestData.hypervisor = remoteConfig.hypervisor;

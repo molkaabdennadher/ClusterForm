@@ -1,11 +1,14 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import ReactTooltip from "react-tooltip";
+
 
 const DistantConfig = () => {
   // États d'origine
   const [ip, setIp] = useState("");
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
   const [remote_os, setOs] = useState("Windows");
   const [hypervisor, setHypervisor] = useState("VirtualBox");
   const navigate = useNavigate();
@@ -21,6 +24,7 @@ const DistantConfig = () => {
         remote_ip: ip,
         remote_user: login,
         remote_password: password,
+        mail: email,
         remote_os,
         hypervisor,
         mode: "distant"
@@ -47,7 +51,9 @@ const DistantConfig = () => {
           value={ip}
           onChange={(e) => setIp(e.target.value)}
           className="w-full p-2 border rounded mb-4"
+          data-tip="Adresse IP de la machine distante où vous souhaitez créer la VM"
           required
+          
         />
 
         <label className="block text-sm font-medium">Username:</label>
@@ -69,7 +75,15 @@ const DistantConfig = () => {
           className="w-full p-2 border rounded mb-4"
           required
         />
-
+        <label className="block text-sm font-medium">Email:</label>
+        <input
+          type="email"
+          placeholder="Enter the email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+          required
+        />
         <label className="block text-sm font-medium">OS:</label>
         <select
           value={remote_os}
@@ -98,6 +112,7 @@ const DistantConfig = () => {
           Connect
         </button>
       </div>
+
     </div>
   );
 };
