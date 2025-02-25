@@ -1,11 +1,13 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 
 export default function Formulaire() {
   const [hostname, setHostname] = useState("");
   const [box, setBox] = useState("ubuntu/trusty64");
   const [ram, setRam] = useState(2);
+  const [totalMemoryGB, setMaxRam] = useState(16);
   const [cpu, setCpu] = useState(1);
+  const [maxCpu, setMaxCpu] = useState(8);
   const [network, setNetwork] = useState("NAT");
   const [submitted, setSubmitted] = useState(false);
   const [ipAddress, setIpAddress] = useState("");
@@ -15,6 +17,19 @@ export default function Formulaire() {
   const location = useLocation();
   const remoteConfig = location.state || {};
   const isRemote = remoteConfig.mode === "distant";
+
+  useEffect(() => {
+    if (!isRemote) {
+      fetch("http://localhost:5000/get-cpu-info")
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.maxCpu) setMaxCpu(data.maxCpu);
+          if (data.totalMemoryGB) setMaxRam(data.totalMemoryGB);
+          console.log("System info:", data);
+        })
+        .catch((err) => console.error("Erreur lors de la récupération des infos système:", err));
+    }
+  }, [isRemote]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -126,7 +141,7 @@ export default function Formulaire() {
           <input
             type="range"
             min="2"
-            max="16"
+            max={totalMemoryGB}
             step="2"
             value={ram}
             onChange={(e) => setRam(Number(e.target.value))}
@@ -137,11 +152,10 @@ export default function Formulaire() {
           <input
             type="range"
             min="1"
-            max="8"
+            max={maxCpu} // la valeur maximale récupérée du back
             step="1"
             value={cpu}
             onChange={(e) => setCpu(Number(e.target.value))}
-            className="w-full mb-4"
           />
 
           <label className="block text-sm font-medium">Network:</label>

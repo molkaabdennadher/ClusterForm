@@ -3,9 +3,11 @@ from flask import Flask, request, jsonify, render_template
 import subprocess
 import os
 import paramiko
+import re
 import traceback
 import random
 import shutil
+import platform
 import smtplib
 from email.message import EmailMessage
 from flask_cors import CORS
@@ -13,26 +15,71 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-def check_and_install_vagrant():
+@app.route('/get-cpu-info', methods=['GET'])
+def get_cpu_info():
     """
-    Vérifie si Vagrant est installé et, sinon, tente de l'installer via Winget.
+    Récupère le nombre de processeurs logiques et la mémoire totale de la machine où tourne Flask.
+    - Sur Windows, utilise PowerShell pour les CPUs et systeminfo pour la RAM.
+    - Sur Linux, utilise lscpu pour les CPUs et free -g pour la RAM.
     """
-    vagrant_path = shutil.which("vagrant")
-    if vagrant_path is None:
-        print("Vagrant n'est pas installé. Tentative d'installation via winget...")
-        try:
-            # Winget installe Vagrant (nécessite d'être en mode administrateur)
-            subprocess.run(
-                ["winget", "install", "--id", "HashiCorp.Vagrant", "-e", "--accept-package-agreements", "--accept-source-agreements"],
-                check=True
+    try:
+        os_type = platform.system()
+        
+        total_memory = 16
+        if os_type == "Windows":
+            # Récupérer le nombre de processeurs logiques via PowerShell
+            cpu_command = (
+                'powershell -Command "Get-WmiObject Win32_Processor | '
+                'Measure-Object -Sum -Property NumberOfLogicalProcessors | '
+                'Select-Object -ExpandProperty Sum"'
             )
-            vagrant_path = shutil.which("vagrant")
-            if vagrant_path:
-                print("Vagrant installé avec succès.")
-            else:
-                raise Exception("Installation terminée mais Vagrant n'a pas été trouvé dans le PATH.")
-        except subprocess.CalledProcessError as e:
-            raise Exception("Échec de l'installation automatique de Vagrant: " + str(e))
+            cpu_result = subprocess.check_output(cpu_command, shell=True, universal_newlines=True).strip()
+            if cpu_result.isdigit():
+                logical_processors = int(cpu_result)
+
+              # Récupérer la mémoire physique totale via systeminfo
+            ram_command = r'systeminfo | findstr /C:"Mémoire physique totale"'
+            # Utilisation de l'encodage cp850 (souvent utilisé par systeminfo)
+            ram_output = subprocess.check_output(ram_command, shell=True, universal_newlines=True, encoding="cp850").strip()
+            print("Sortie de systeminfo:", ram_output)
+            # Utiliser une expression régulière pour extraire le nombre (en Mo)
+            match = re.search(r"([\d\.,]+)", ram_output)
+            if match:
+                mem_str = match.group(1)
+                mem_str = mem_str.replace(",", ".")  # Convertir la virgule en point
+                try:
+                    mem_mb = float(mem_str)
+                    print(mem_mb)
+                    # Convertir de Mo en Go (arrondi en entier)
+                    total_memory = int(mem_mb)
+                    print("Total Memory:", total_memory, "Go")
+                except ValueError:
+                    print("Impossible de convertir la mémoire:", mem_str)
+
+        elif os_type == "Linux":
+            cpu_command = "lscpu | grep '^CPU(s):' | awk '{print $2}'"
+            cpu_result = subprocess.check_output(cpu_command, shell=True, universal_newlines=True).strip()
+            if cpu_result.isdigit():
+                logical_processors = int(cpu_result)
+
+            ram_command = "free -g | grep '^Mem:' | awk '{print $2}'"
+            ram_output = subprocess.check_output(ram_command, shell=True, universal_newlines=True).strip()
+            if ram_output.isdigit():
+                total_memory = int(ram_output)
+        else:
+            print("OS non supporté, utilisation de valeurs par défaut.")
+    
+
+        # Définir la valeur maximale de vCPU (max = 18)
+        max_cpu = min(logical_processors, 16)
+        print(f"Max CPU: {max_cpu}, Total RAM: {total_memory} Go")
+
+        return jsonify({"maxCpu": max_cpu, "totalMemoryGB": total_memory}), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        print("Erreur lors de la récupération des infos CPU/RAM:", e)
+        return jsonify({"maxCpu": 18, "totalMemoryGB": 20}), 200  # Valeurs par défaut en cas d'erreur
 
 def configure_ssh_with_powershell():
     """
