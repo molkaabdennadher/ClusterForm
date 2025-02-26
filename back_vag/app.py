@@ -217,12 +217,7 @@ def index():
 
 @app.route('/create-vm', methods=['POST'])
 def create_vm():
-    # Création locale de la VM (similaire à votre code existant)
-    try:
-        check_and_install_vagrant()
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+   
     data = request.json
     vm_name = data.get("vm_name")
     box = data.get("box")

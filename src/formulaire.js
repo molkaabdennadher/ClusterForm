@@ -104,7 +104,8 @@ export default function Formulaire() {
           status: "Running",
           date: new Date().toLocaleDateString(),
           ipAddress: data.ipAddress,
-          port: data.port
+          port: data.port,
+          mode: remoteConfig.mode || "local"
         };
 
         const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];

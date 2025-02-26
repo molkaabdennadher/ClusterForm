@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from "react";
 
 const Dashboard = () => {
@@ -19,18 +18,29 @@ const Dashboard = () => {
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
-  const handleDelete = (index) => {
-    const updatedMachines = machines.filter((_, i) => i !== index);
-    setMachines(updatedMachines);
-    localStorage.setItem("vms", JSON.stringify(updatedMachines));
+  const handleStart = (machine) => {
+    // Ajouter la logique pour démarrer la machine virtuelle
+    console.log("Démarrage de la machine virtuelle :", machine.hostname);
+  };
 
-    window.dispatchEvent(new Event("storage"));
+  const handleConsole = (machine) => {
+    // Ajouter la logique pour ouvrir la console de la machine virtuelle
+    console.log("Ouverture de la console de la machine virtuelle :", machine.hostname);
+  };
+
+  const handleStop = (machine) => {
+    // Ajouter la logique pour arrêter la machine virtuelle
+    console.log("Arrêt de la machine virtuelle :", machine.hostname);
+  };
+
+  const handleDelete = (index) => {
+    // Ajouter la logique pour supprimer la machine virtuelle
+    console.log("Suppression de la machine virtuelle :", machines[index].hostname);
   };
 
   const filteredMachines = machines.filter((machine) =>
     machine.hostname.toLowerCase().includes(searchTerm.toLowerCase())
   );
-
   return (
     <div className="p-6 bg-gradient-to-b from-teal-100 to-white min-h-screen">
       <h1 className="text-4xl font-bold text-center text-teal-600">Dashboard</h1>
@@ -54,6 +64,7 @@ const Dashboard = () => {
             <th className="p-3 border">Status</th>
             <th className="p-3 border">Date of Creation</th>
             <th className="p-3 border">SSH Address</th>
+            <th className="p-3 border">Mode</th>
             <th className="p-3 border">Actions</th>
           </tr>
         </thead>
@@ -70,7 +81,13 @@ const Dashboard = () => {
               </td>
               <td className="p-3 border">{machine.date}</td>
               <td className="p-3 border">{machine.ipAddress}:{machine.port}</td>
-              <td className="p-3 border">
+              <td className="p-3 border">{machine.mode} 
+</td>
+              
+              <td className="p-3 border flex justify-around">
+                <button onClick={() => handleStart(machine)} className="text-green-500 hover:text-green-700">▶</button>
+                <button onClick={() => handleStop(machine)} className="text-yellow-500 hover:text-yellow-700">■</button>
+                <button onClick={() => handleConsole(machine)} className="text-blue-500 hover:text-blue-700">⎘</button>
                 <button onClick={() => handleDelete(index)} className="text-red-500 hover:text-red-700">✖</button>
               </td>
             </tr>
