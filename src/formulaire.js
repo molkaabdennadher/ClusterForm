@@ -29,6 +29,29 @@ export default function Formulaire() {
         })
         .catch((err) => console.error("Erreur lors de la récupération des infos système:", err));
     }
+    else {
+      console.log("Mode distant");
+      // Pour le mode distant, on appelle l'endpoint pour récupérer les infos système de la machine distante.
+      fetch("http://localhost:5000/get-remote-cpu-info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          remote_ip: remoteConfig.remote_ip,
+          remote_user: remoteConfig.remote_user,
+          remote_password: remoteConfig.remote_password,
+          remote_os: remoteConfig.remote_os,
+        }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.maxCpu) setMaxCpu(data.maxCpu);
+          if (data.totalMemoryGB) setMaxRam(data.totalMemoryGB);
+          console.log("Remote system info:", data);
+        })
+        .catch((err) =>
+          console.error("Erreur lors de la récupération des infos système distantes:", err)
+        ); }
+      
   }, [isRemote]);
 
   const handleSubmit = async (e) => {

@@ -15,6 +15,79 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/get-remote-cpu-info', methods=['POST'])
+def get_remote_cpu_info():
+    """
+    Récupère le nombre de processeurs logiques et la mémoire totale (en Go) de la machine distante
+    via SSH. Les commandes exécutées dépendent de l'OS distant (Windows ou Linux).
+    """
+    try:
+        data = request.get_json()
+        remote_ip = data.get('remote_ip')
+        remote_user = data.get('remote_user')
+        remote_password = data.get('remote_password')
+        remote_os = data.get('remote_os', 'Windows').lower()
+
+        # Créer et configurer le client SSH
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
+
+        logical_processors = 2  # Valeur par défaut
+        total_memory = 16       # Valeur par défaut en Go
+
+        if remote_os == "windows":
+            # Récupérer le nombre de processeurs logiques via PowerShell
+            cpu_command = (
+                'powershell -Command "Get-WmiObject Win32_Processor | '
+                'Measure-Object -Sum -Property NumberOfLogicalProcessors | '
+                'Select-Object -ExpandProperty Sum"'
+            )
+            cpu_result = client.exec_command(cpu_command)[1].read().decode('utf-8', errors='replace').strip()
+            if cpu_result.isdigit():
+                logical_processors = int(cpu_result)
+
+            # Récupérer la mémoire physique totale via systeminfo
+            ram_command = r'systeminfo | findstr /C:"Mémoire physique totale"'
+            # Utiliser l'encodage cp850 pour gérer la sortie OEM
+            ram_output = client.exec_command(ram_command)[1].read().decode('cp850', errors='replace').strip()
+            print("Sortie de systeminfo (remote):", ram_output)
+            # Utiliser une regex pour extraire le nombre (en Mo)
+            match = re.search(r"([\d\.,]+)", ram_output)
+            if match:
+                mem_str = match.group(1)
+                mem_str = mem_str.replace(",", ".").strip()
+                try:
+                    mem_mb = float(mem_str)
+                    print(mem_mb)
+                    # Convertir de Mo en Go (arrondi à l'entier)
+                    total_memory = int(mem_mb)
+                    print("Total Memory (remote):", total_memory, "Go")
+                except ValueError:
+                    print("Conversion échouée pour la mémoire:", mem_str)
+        elif remote_os == "linux":
+            # Récupérer le nombre de CPUs via lscpu
+            cpu_command = "lscpu | grep '^CPU(s):' | awk '{print $2}'"
+            cpu_result = client.exec_command(cpu_command)[1].read().decode('utf-8', errors='replace').strip()
+            if cpu_result.isdigit():
+                logical_processors = int(cpu_result)
+            # Récupérer la mémoire via free -g
+            ram_command = "free -g | grep '^Mem:' | awk '{print $2}'"
+            ram_output = client.exec_command(ram_command)[1].read().decode('utf-8', errors='replace').strip()
+            if ram_output.isdigit():
+                total_memory = int(ram_output)
+        else:
+            print("OS non supporté, utilisation de valeurs par défaut.")
+
+        max_cpu = min(logical_processors, 16)
+        print(f"Remote - Max CPU: {max_cpu}, Total RAM: {total_memory} Go")
+        client.close()
+        return jsonify({"maxCpu": max_cpu, "totalMemoryGB": total_memory}), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"maxCpu": 8, "totalMemoryGB": 16, "error": str(e)}), 200
+
+
 @app.route('/get-cpu-info', methods=['GET'])
 def get_cpu_info():
     """
