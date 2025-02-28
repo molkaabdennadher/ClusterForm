@@ -94,16 +94,22 @@ const Dashboard = () => {
       alert("Erreur lors de la communication avec le serveur.");
     }
   };
-
-
+  
   const handleDelete = async (machine, index) => {
     try {
-      const requestData = {
-        mode: machine.mode || "local",  // Par défaut "local"
-        vm_name: machine.hostname,
-      };
-      console.log(machine)
+      console.log("Machine à supprimer:", machine);
+      // Utilisez une clé cohérente : ici, on vérifie d'abord vm_name, puis hostname
+      const vmName = machine.hostname;
+      if (!vmName) {
+        alert("Erreur: Le nom de la VM n'est pas défini.");
+        return;
+      }
 
+      const requestData = {
+        mode: machine.mode || "local",
+        vm_name: vmName,
+      };
+      console.log(machine);
       if (machine.mode === "distant") {
         if (!machine.remote_ip) {
           alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
@@ -115,7 +121,7 @@ const Dashboard = () => {
         requestData.remote_os = machine.remote_os;
       }
 
-      const response = await fetch("http://localhost:5000//delete-vm", {
+      const response = await fetch("http://localhost:5000/delete-vm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestData),
@@ -134,7 +140,6 @@ const Dashboard = () => {
       alert("Erreur lors de la communication avec le serveur.");
     }
   };
-
 
   const handleOpenTerminal = async (machine) => {
     try {
@@ -219,7 +224,7 @@ const Dashboard = () => {
                 <button onClick={() => handleStart(machine)} className="text-green-500 hover:text-green-700">▶</button>
                 <button onClick={() => handleStop(machine)} className="text-yellow-500 hover:text-yellow-700">■</button>
                 <button onClick={() => handleOpenTerminal(machine)} className="text-blue-500 hover:text-blue-700">⎘</button>
-                <button onClick={() => handleDelete(index)} className="text-red-500 hover:text-red-700">✖</button>
+                <button onClick={() => handleDelete(machine)} className="text-red-500 hover:text-red-700">✖</button>
               </td>
             </tr>
           ))}

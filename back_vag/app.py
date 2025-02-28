@@ -167,7 +167,7 @@ def delete_vm():
 
             # Tenter d'arrêter la VM avant de la détruire
             subprocess.run(["vagrant", "halt"], cwd=vm_path, check=False)
-            time.sleep(5)  # Attendre quelques secondes pour que la VM s'arrête
+            #time.sleep(5)  # Attendre quelques secondes pour que la VM s'arrête
             subprocess.run(["vagrant", "destroy", "-f"], cwd=vm_path, check=True)
             return jsonify({"message": f"VM {vm_name} deleted locally"}), 200
 
