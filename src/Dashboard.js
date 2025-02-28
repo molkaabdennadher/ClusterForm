@@ -18,26 +18,157 @@ const Dashboard = () => {
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
-  const handleStart = (machine) => {
-    // Ajouter la logique pour démarrer la machine virtuelle
-    console.log("Démarrage de la machine virtuelle :", machine.hostname);
+  const handleStart = async (machine) => {
+    try {
+      // On construit l'objet de requête, incluant le mode et, pour distant, les infos de connexion.
+      const requestData = {
+        mode: machine.mode || "local",  // Par défaut "local"
+        vm_name: machine.hostname,
+      };
+      console.log(machine)
+      if (machine.mode === "distant") {
+        // Assurez-vous que les informations de connexion pour le mode distant sont présentes
+        if (!machine.remote_ip) {
+          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
+          return;
+        }
+        requestData.remote_ip = machine.remote_ip;
+        requestData.remote_user = machine.remote_user;
+        requestData.remote_password = machine.remote_password;
+        requestData.remote_os = machine.remote_os;
+      }
+
+      const response = await fetch("http://localhost:5000/start-vm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestData),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        alert(`✅ ${data.message}`);
+        // Optionnel: Mettre à jour la machine dans localStorage ou rafraîchir le dashboard
+      } else {
+        alert(`❌ Erreur: ${data.error}`);
+      }
+    } catch (error) {
+      console.error("Erreur de requête:", error);
+      alert("Erreur lors de la communication avec le serveur.");
+    }
   };
 
-  const handleConsole = (machine) => {
-    // Ajouter la logique pour ouvrir la console de la machine virtuelle
-    console.log("Ouverture de la console de la machine virtuelle :", machine.hostname);
+ 
+  const handleStop = async (machine) => {
+    try {
+      // On construit l'objet de requête, incluant le mode et, pour distant, les infos de connexion.
+      const requestData = {
+        mode: machine.mode || "local",  // Par défaut "local"
+        vm_name: machine.hostname,
+      };
+
+      if (machine.mode === "distant") {
+        // Assurez-vous que les informations de connexion pour le mode distant sont présentes
+        if (!machine.remote_ip) {
+          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
+          return;
+        }
+        requestData.remote_ip = machine.remote_ip;
+        requestData.remote_user = machine.remote_user;
+        requestData.remote_password = machine.remote_password;
+        requestData.remote_os = machine.remote_os;
+      }
+
+      const response = await fetch("http://localhost:5000/stop-vm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestData),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        alert(`✅ ${data.message}`);
+        // Optionnel: Mettre à jour la machine dans localStorage ou rafraîchir le dashboard
+      } else {
+        alert(`❌ Erreur: ${data.error}`);
+      }
+    } catch (error) {
+      console.error("Erreur de requête:", error);
+      alert("Erreur lors de la communication avec le serveur.");
+    }
   };
 
-  const handleStop = (machine) => {
-    // Ajouter la logique pour arrêter la machine virtuelle
-    console.log("Arrêt de la machine virtuelle :", machine.hostname);
+
+  const handleDelete = async (machine, index) => {
+    try {
+      const requestData = {
+        mode: machine.mode || "local",  // Par défaut "local"
+        vm_name: machine.hostname,
+      };
+      console.log(machine)
+
+      if (machine.mode === "distant") {
+        if (!machine.remote_ip) {
+          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
+          return;
+        }
+        requestData.remote_ip = machine.remote_ip;
+        requestData.remote_user = machine.remote_user;
+        requestData.remote_password = machine.remote_password;
+        requestData.remote_os = machine.remote_os;
+      }
+
+      const response = await fetch("http://localhost:5000//delete-vm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestData),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        alert(`✅ ${data.message}`);
+        const updatedMachines = machines.filter((_, idx) => idx !== index);
+        localStorage.setItem("vms", JSON.stringify(updatedMachines));
+        setMachines(updatedMachines);
+      } else {
+        alert(`❌ Erreur: ${data.error}`);
+      }
+    } catch (error) {
+      console.error("Erreur de requête:", error);
+      alert("Erreur lors de la communication avec le serveur.");
+    }
   };
 
-  const handleDelete = (index) => {
-    // Ajouter la logique pour supprimer la machine virtuelle
-    console.log("Suppression de la machine virtuelle :", machines[index].hostname);
-  };
 
+  const handleOpenTerminal = async (machine) => {
+    try {
+      const requestData = {
+        mode: machine.mode || "local",
+        vm_name: machine.hostname,
+      };
+      if (machine.mode === "distant") {
+        if (!machine.remote_ip) {
+          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
+          return;
+        }
+        requestData.remote_ip = machine.remote_ip;
+        requestData.remote_user = machine.remote_user;
+        requestData.remote_password = machine.remote_password;
+        requestData.remote_os = machine.remote_os;
+      }
+      const response = await fetch("http://localhost:5000/open-terminal-vm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestData),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        // Afficher la configuration SSH (ou ouvrir une nouvelle fenêtre si une solution web SSH est intégrée)
+        alert(`SSH Configuration:\n${data.sshConfig}`);
+      } else {
+        alert(`❌ Erreur: ${data.error}`);
+      }
+    } catch (error) {
+      console.error("Erreur de requête:", error);
+      alert("Erreur lors de la communication avec le serveur.");
+    }
+  };
   const filteredMachines = machines.filter((machine) =>
     machine.hostname.toLowerCase().includes(searchTerm.toLowerCase())
   );
@@ -87,7 +218,7 @@ const Dashboard = () => {
               <td className="p-3 border flex justify-around">
                 <button onClick={() => handleStart(machine)} className="text-green-500 hover:text-green-700">▶</button>
                 <button onClick={() => handleStop(machine)} className="text-yellow-500 hover:text-yellow-700">■</button>
-                <button onClick={() => handleConsole(machine)} className="text-blue-500 hover:text-blue-700">⎘</button>
+                <button onClick={() => handleOpenTerminal(machine)} className="text-blue-500 hover:text-blue-700">⎘</button>
                 <button onClick={() => handleDelete(index)} className="text-red-500 hover:text-red-700">✖</button>
               </td>
             </tr>

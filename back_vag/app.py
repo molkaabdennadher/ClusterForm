@@ -86,6 +86,271 @@ def get_remote_cpu_info():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"maxCpu": 8, "totalMemoryGB": 16, "error": str(e)}), 200
+@app.route('/stop-vm', methods=['POST']) 
+def stop_vm():
+    """
+    Arrête la VM spécifiée, en local ou en mode distant.
+    Si la VM n'est pas trouvée, renvoie un message d'erreur.
+    """
+    try:
+        data = request.get_json()
+        mode = data.get("mode", "local")  # "local" par défaut
+        vm_name = data.get("vm_name")
+        if not vm_name:
+            return jsonify({"error": "vm_name is required"}), 400
+
+        if mode == "local":
+            vm_path = os.path.join(".", "vms", vm_name)
+            if not os.path.exists(vm_path):
+                return jsonify({"error": "VM not found"}), 404
+            # Arrêter la VM en local (commande correcte: vagrant halt)
+            subprocess.run(["vagrant", "halt"], cwd=vm_path, check=True)
+            return jsonify({"message": f"VM {vm_name} stopped locally"}), 200
+        else:
+            # Mode distant : vérification des paramètres de connexion
+            remote_ip = data.get("remote_ip")
+            remote_user = data.get("remote_user")
+            remote_password = data.get("remote_password")
+            remote_os = data.get("remote_os", "Windows").lower()
+            if not remote_ip or not remote_user or not remote_password:
+                return jsonify({"error": "Remote connection parameters missing"}), 400
+
+            # Établir la connexion SSH via Paramiko
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
+            sftp = client.open_sftp()
+            try:
+                sftp.chdir("vms")
+                sftp.chdir(vm_name)
+            except IOError:
+                sftp.close()
+                client.close()
+                return jsonify({"error": "VM not found on remote host"}), 404
+            remote_vm_folder = sftp.getcwd()
+
+            # Exécuter "vagrant halt" sur la machine distante
+            if remote_os == "windows":
+                folder = remote_vm_folder.lstrip("/")
+                command = f'cd /d "{folder}" && vagrant halt'
+            else:
+                command = f'cd "{remote_vm_folder}" && vagrant halt'
+            stdin, stdout, stderr = client.exec_command(command)
+            out = stdout.read().decode('utf-8', errors='replace')
+            err = stderr.read().decode('utf-8', errors='replace')
+            sftp.close()
+            client.close()
+            if err.strip():
+                return jsonify({"error": err}), 500
+            return jsonify({"message": f"VM {vm_name} stopped remotely", "output": out}), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+@app.route('/delete-vm', methods=['POST'])
+def delete_vm():
+    """
+    Supprime (détruit) la VM spécifiée, en local ou en mode distant.
+    Tente d'arrêter la VM avant la destruction.
+    """
+    try:
+        data = request.get_json()
+        mode = data.get("mode", "local")  # "local" par défaut
+        vm_name = data.get("vm_name")
+        print(data)
+        if not vm_name:
+            return jsonify({"error": "vm_name is required"}), 400
+
+        if mode == "local":
+            vm_path = os.path.join(".", "vms", vm_name)
+            if not os.path.exists(vm_path):
+                return jsonify({"error": "VM not found"}), 404
+
+            # Tenter d'arrêter la VM avant de la détruire
+            subprocess.run(["vagrant", "halt"], cwd=vm_path, check=False)
+            time.sleep(5)  # Attendre quelques secondes pour que la VM s'arrête
+            subprocess.run(["vagrant", "destroy", "-f"], cwd=vm_path, check=True)
+            return jsonify({"message": f"VM {vm_name} deleted locally"}), 200
+
+        else:
+            # Mode distant : vérification des paramètres de connexion
+            remote_ip = data.get("remote_ip")
+            remote_user = data.get("remote_user")
+            remote_password = data.get("remote_password")
+            remote_os = data.get("remote_os", "Windows").lower()
+            if not remote_ip or not remote_user or not remote_password:
+                return jsonify({"error": "Remote connection parameters missing"}), 400
+
+            # Établir la connexion SSH via Paramiko
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
+            sftp = client.open_sftp()
+            try:
+                sftp.chdir("vms")
+                sftp.chdir(vm_name)
+            except IOError:
+                sftp.close()
+                client.close()
+                return jsonify({"error": "VM not found on remote host"}), 404
+            remote_vm_folder = sftp.getcwd()
+
+            # Tenter d'arrêter la VM sur la machine distante
+            if remote_os == "windows":
+                folder = remote_vm_folder.lstrip("/")
+                halt_cmd = f'cd /d "{folder}" && vagrant halt'
+            else:
+                halt_cmd = f'cd "{remote_vm_folder}" && vagrant halt'
+            client.exec_command(halt_cmd)
+            time.sleep(5)  # Attendre quelques secondes après l'arrêt
+
+            # Exécuter "vagrant destroy -f" sur la machine distante
+            if remote_os == "windows":
+                folder = remote_vm_folder.lstrip("/")
+                command = f'cd /d "{folder}" && vagrant destroy -f'
+            else:
+                command = f'cd "{remote_vm_folder}" && vagrant destroy -f'
+            stdin, stdout, stderr = client.exec_command(command)
+            out = stdout.read().decode('utf-8', errors='replace')
+            err = stderr.read().decode('utf-8', errors='replace')
+            sftp.close()
+            client.close()
+            if err.strip():
+                return jsonify({"error": err}), 500
+            return jsonify({"message": f"VM {vm_name} deleted remotely", "output": out}), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/start-vm', methods=['POST'])
+def start_vm():
+    """
+    Démarre la VM spécifiée, en local ou en mode distant.
+    Si la VM n'est pas trouvée, renvoie un message d'erreur.
+    """
+    try:
+        data = request.get_json()
+        mode = data.get("mode", "local")  # "local" par défaut
+        vm_name = data.get("vm_name")
+        if not vm_name:
+            return jsonify({"error": "vm_name is required"}), 400
+
+        if mode == "local":
+            vm_path = os.path.join(".", "vms", vm_name)
+            if not os.path.exists(vm_path):
+                return jsonify({"error": "VM not found"}), 404
+            # Démarrer la VM en local
+            subprocess.run(["vagrant", "up"], cwd=vm_path, check=True)
+            return jsonify({"message": f"VM {vm_name} started locally"}), 200
+        else:
+            # Mode distant : vérification des paramètres de connexion
+            remote_ip = data.get("remote_ip")
+            remote_user = data.get("remote_user")
+            remote_password = data.get("remote_password")
+            remote_os = data.get("remote_os", "Windows").lower()
+            if not remote_ip or not remote_user or not remote_password:
+                return jsonify({"error": "Remote connection parameters missing"}), 400
+
+            # Établir la connexion SSH via Paramiko
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
+            sftp = client.open_sftp()
+            try:
+                sftp.chdir("vms")
+                sftp.chdir(vm_name)
+            except IOError:
+                sftp.close()
+                client.close()
+                return jsonify({"error": "VM not found on remote host"}), 404
+            remote_vm_folder = sftp.getcwd()
+
+            # Exécuter "vagrant up" sur la machine distante
+            if remote_os == "windows":
+                folder = remote_vm_folder.lstrip("/")
+                command = f'cd /d "{folder}" && vagrant up'
+            else:
+                command = f'cd "{remote_vm_folder}" && vagrant up'
+            stdin, stdout, stderr = client.exec_command(command)
+            out = stdout.read().decode('utf-8', errors='replace')
+            err = stderr.read().decode('utf-8', errors='replace')
+            sftp.close()
+            client.close()
+            if err.strip():
+                return jsonify({"error": err}), 500
+            return jsonify({"message": f"VM {vm_name} started remotely", "output": out}), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+def parse_ssh_config(ssh_config_raw):
+    """
+    Parse la sortie de `vagrant ssh-config` pour extraire HostName, Port et IdentityFile.
+    Retourne un tuple (host, port, identity_file).
+    """
+    host = "127.0.0.1"
+    port = "22"
+    identity_file = None
+
+    for line in ssh_config_raw.splitlines():
+        line = line.strip()
+        if line.startswith("HostName"):
+            # Exemple: HostName 127.0.0.1
+            host = line.split()[1]
+        elif line.startswith("Port"):
+            # Exemple: Port 2222
+            port = line.split()[1]
+        elif line.startswith("IdentityFile"):
+            # Exemple: IdentityFile C:/Users/User/.../private_key
+            identity_file = " ".join(line.split()[1:])  # Au cas où il y a des espaces
+            identity_file = identity_file.strip('"')    # Retire les guillemets si présents
+    return host, port, identity_file
+
+@app.route('/open-terminal-vm', methods=['POST'])
+def open_terminal_vm():
+    """
+    Tente d'ouvrir un terminal CMD local pour se connecter en SSH à la VM (mode local).
+    - Ne fonctionne que si Flask tourne sur la même machine que l'utilisateur.
+    - Sur Windows, utilise 'start cmd /k ssh ...'.
+    - Nécessite un environnement interactif (pas un service).
+    """
+    try:
+        data = request.get_json()
+        vm_name = data.get("vm_name")
+        if not vm_name:
+            return jsonify({"error": "vm_name is required"}), 400
+
+        # Chemin local de la VM
+        vm_path = os.path.join(".", "vms", vm_name)
+        if not os.path.exists(vm_path):
+            return jsonify({"error": "VM not found"}), 404
+
+        # Exécute vagrant ssh-config pour récupérer HostName, Port, IdentityFile
+        ssh_config_raw = subprocess.check_output(
+            ["vagrant", "ssh-config"], 
+            cwd=vm_path, 
+            universal_newlines=True
+        )
+
+        host, port, identity_file = parse_ssh_config(ssh_config_raw)
+        if not identity_file:
+            return jsonify({"error": "Could not parse IdentityFile from ssh-config"}), 500
+
+        # Commande SSH
+        ssh_cmd = f'ssh -p {port} -i "{identity_file}" vagrant@{host}'
+
+        # Sur Windows, on peut ouvrir un cmd avec la commande 'start cmd /k ...'
+        # shell=True est nécessaire pour interpréter 'start' et d'autres builtins cmd.
+        subprocess.Popen(f'start cmd /k {ssh_cmd}', shell=True)
+
+        return jsonify({"message": "Local terminal opened"}), 200
+    except subprocess.CalledProcessError as e:
+        # Si vagrant ssh-config renvoie un code non nul
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/get-cpu-info', methods=['GET'])
