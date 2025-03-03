@@ -3,11 +3,7 @@ import React, { useState, useEffect } from "react";
 const Dashboard = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [machines, setMachines] = useState([]);
-
-  const loadMachines = () => {
-    const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];
-    setMachines(storedMachines);
-  };
+  
 
   useEffect(() => {
     loadMachines();
@@ -17,7 +13,38 @@ const Dashboard = () => {
 
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
+  // Fonction pour charger les machines avec statut actualisé
+  const loadMachines = async () => {
+    const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];
 
+    const updatedMachines = await Promise.all(
+      storedMachines.map(async (machine) => {
+        try {
+          const response = await fetch('http://localhost:5000/get-vm-status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vm_name: machine.hostname,
+              mode: machine.mode || 'local'
+            })
+          });
+
+          const data = await response.json();
+          return { ...machine, status: data.status };
+        } catch (error) {
+          return { ...machine, status: 'Erreur' };
+        }
+      })
+    );
+  
+  setMachines(updatedMachines);
+};
+
+useEffect(() => {
+  loadMachines();
+  const interval = setInterval(loadMachines, 15000); // Mise à jour toutes les 15s
+  return () => clearInterval(interval);
+}, []);
   const handleStart = async (machine) => {
     try {
       // On construit l'objet de requête, incluant le mode et, pour distant, les infos de connexion.
@@ -177,6 +204,19 @@ const Dashboard = () => {
   const filteredMachines = machines.filter((machine) =>
     machine.hostname.toLowerCase().includes(searchTerm.toLowerCase())
   );
+  // Fonction pour déterminer la couleur du statut
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'running':
+        return 'text-green-500';
+      case 'poweroff':
+        return 'text-red-500';
+      case 'Non autorisé':
+        return 'text-orange-500';
+      default:
+        return 'text-gray-500';
+    }
+  };
   return (
     <div className="p-6 bg-gradient-to-b from-teal-100 to-white min-h-screen">
       <h1 className="text-4xl font-bold text-center text-teal-600">Dashboard</h1>
@@ -212,7 +252,7 @@ const Dashboard = () => {
               <td className="p-3 border">{machine.network}</td>
               <td className="p-3 border">{machine.ram}</td>
               <td className="p-3 border">{machine.cpu}</td>
-              <td className={`p-3 border font-semibold ${machine.status === "Running" ? "text-green-500" : "text-red-500"}`}>
+              <td className={`p-3 border font-semibold ${getStatusColor(machine.status)}`}>
                 {machine.status}
               </td>
               <td className="p-3 border">{machine.date}</td>
@@ -232,6 +272,8 @@ const Dashboard = () => {
       </table>
     </div>
   );
+
+
 };
 
 export default Dashboard;
