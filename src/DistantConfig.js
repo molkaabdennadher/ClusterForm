@@ -1,35 +1,18 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import ReactTooltip from "react-tooltip";
-
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 const DistantConfig = () => {
-  // États d'origine
-  const [ip, setIp] = useState("");
-  const [login, setLogin] = useState("");
-  const [password, setPassword] = useState("");
-  const [email, setEmail] = useState("");
-  const [remote_os, setOs] = useState("Windows");
-  const [hypervisor, setHypervisor] = useState("VirtualBox");
+  const [proxmoxIp, setProxmoxIp] = useState('');
+  const [nodeName, setNodeName] = useState('');
+  const [vmIp, setVmIp] = useState('');
+  const [user, setUser] = useState('root'); // Champ utilisateur prédéfini sur 'root'
+  const [password, setPassword] = useState('');
+  const [vmId, setVmId] = useState(''); // Ajout de l'état pour VM ID
   const navigate = useNavigate();
 
   const handleSubmit = () => {
-    if (!ip || !login || !password) {
-      alert("Veuillez remplir tous les champs !");
-      return;
-    }
-    // Navigation vers le formulaire en transmettant les infos de connexion distante
-    navigate("/formulaire", {
-      state: {
-        remote_ip: ip,
-        remote_user: login,
-        remote_password: password,
-        mail: email,
-        remote_os,
-        hypervisor,
-        mode: "distant"
-      }
-    });
+    // Logique pour envoyer les données ou naviguer vers le formulaire
+    navigate('/formulaire', { state: { proxmoxIp, nodeName, vmIp, user, password, vmId } });
   };
 
   return (
@@ -44,24 +27,42 @@ const DistantConfig = () => {
       </div>
       <h1 className="text-4xl font-bold text-teal-600 mb-6">Distant Mode</h1>
       <div className="bg-white p-6 rounded-lg shadow-lg w-96">
-        <label className="block text-sm font-medium">IP Address:</label>
+        <label className="block text-sm font-medium">Proxmox IP:</label>
         <input
           type="text"
-          placeholder="Enter the IP address"
-          value={ip}
-          onChange={(e) => setIp(e.target.value)}
+          placeholder="Enter Proxmox IP"
+          value={proxmoxIp}
+          onChange={(e) => setProxmoxIp(e.target.value)}
           className="w-full p-2 border rounded mb-4"
-          data-tip="Adresse IP de la machine distante où vous souhaitez créer la VM"
           required
-          
         />
 
-        <label className="block text-sm font-medium">Username:</label>
+        <label className="block text-sm font-medium">Node Name:</label>
         <input
           type="text"
-          placeholder="Enter the username"
-          value={login}
-          onChange={(e) => setLogin(e.target.value)}
+          placeholder="Enter Proxmox Node Name"
+          value={nodeName}
+          onChange={(e) => setNodeName(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+          required
+        />
+
+        <label className="block text-sm font-medium">VM IP:</label>
+        <input
+          type="text"
+          placeholder="Enter VM IP"
+          value={vmIp}
+          onChange={(e) => setVmIp(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+          required
+        />
+
+        <label className="block text-sm font-medium">User:</label>
+        <input
+          type="text"
+          placeholder="Enter User"
+          value={user}
+          onChange={(e) => setUser(e.target.value)}
           className="w-full p-2 border rounded mb-4"
           required
         />
@@ -69,40 +70,22 @@ const DistantConfig = () => {
         <label className="block text-sm font-medium">Password:</label>
         <input
           type="password"
-          placeholder="Enter the password"
+          placeholder="Enter Proxmox Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           className="w-full p-2 border rounded mb-4"
           required
         />
-        <label className="block text-sm font-medium">Email:</label>
+
+        <label className="block text-sm font-medium">VM ID:</label>
         <input
-          type="email"
-          placeholder="Enter the email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          type="text"
+          placeholder="Enter VM ID"
+          value={vmId}
+          onChange={(e) => setVmId(e.target.value)}
           className="w-full p-2 border rounded mb-4"
           required
         />
-        <label className="block text-sm font-medium">OS:</label>
-        <select
-          value={remote_os}
-          onChange={(e) => setOs(e.target.value)}
-          className="w-full p-2 border rounded mb-4"
-        >
-          <option value="Windows">Windows</option>
-          <option value="Linux">Linux</option>
-        </select>
-
-        <label className="block text-sm font-medium">Hypervisor:</label>
-        <select
-          value={hypervisor}
-          onChange={(e) => setHypervisor(e.target.value)}
-          className="w-full p-2 border rounded mb-4"
-        >
-          <option value="VirtualBox">VirtualBox</option>
-          <option value="VMware">VMware Workstation Pro</option>
-        </select>
 
         <button
           type="button"
@@ -112,10 +95,8 @@ const DistantConfig = () => {
           Connect
         </button>
       </div>
-
     </div>
   );
 };
 
 export default DistantConfig;
-

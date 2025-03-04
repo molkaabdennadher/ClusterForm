@@ -1,0 +1,16 @@
+---
+- name: Configure VM
+  hosts: all
+  become: true
+  tasks:
+    - name: Update package list
+      apt:
+        update_cache: yes
+
+    - name: Install essential packages
+      apt:
+        name: 
+          - net-tools
+          - curl
+          - git
+        state: present

@@ -1,279 +1,110 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect } from 'react';
 
 const Dashboard = () => {
-  const [searchTerm, setSearchTerm] = useState("");
-  const [machines, setMachines] = useState([]);
-  
+  const [vms, setVms] = useState([]);
 
   useEffect(() => {
-    loadMachines();
-
-    const handleStorageChange = () => loadMachines();
-    window.addEventListener("storage", handleStorageChange);
-
-    return () => window.removeEventListener("storage", handleStorageChange);
+    // Récupérer les VMs depuis localStorage lors du montage du composant
+    const storedVMs = JSON.parse(localStorage.getItem('vms')) || [];
+    setVms(storedVMs);
   }, []);
-  // Fonction pour charger les machines avec statut actualisé
-  const loadMachines = async () => {
-    const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];
 
-    const updatedMachines = await Promise.all(
-      storedMachines.map(async (machine) => {
-        try {
-          const response = await fetch('http://localhost:5000/get-vm-status', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              vm_name: machine.hostname,
-              mode: machine.mode || 'local'
-            })
-          });
-
-          const data = await response.json();
-          return { ...machine, status: data.status };
-        } catch (error) {
-          return { ...machine, status: 'Erreur' };
-        }
-      })
+  const handleStart = (vm) => {
+    // Logique pour démarrer la VM
+    const updatedVMs = vms.map((v) =>
+      v.hostname === vm.hostname ? { ...v, status: 'Running' } : v
     );
-  
-  setMachines(updatedMachines);
-};
+    setVms(updatedVMs);
+    localStorage.setItem('vms', JSON.stringify(updatedVMs));
+    console.log(`Starting VM: ${vm.hostname}`);
+  };
 
-useEffect(() => {
-  loadMachines();
-  const interval = setInterval(loadMachines, 15000); // Mise à jour toutes les 15s
-  return () => clearInterval(interval);
-}, []);
-  const handleStart = async (machine) => {
-    try {
-      // On construit l'objet de requête, incluant le mode et, pour distant, les infos de connexion.
-      const requestData = {
-        mode: machine.mode || "local",  // Par défaut "local"
-        vm_name: machine.hostname,
-      };
-      console.log(machine)
-      if (machine.mode === "distant") {
-        // Assurez-vous que les informations de connexion pour le mode distant sont présentes
-        if (!machine.remote_ip) {
-          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
-          return;
-        }
-        requestData.remote_ip = machine.remote_ip;
-        requestData.remote_user = machine.remote_user;
-        requestData.remote_password = machine.remote_password;
-        requestData.remote_os = machine.remote_os;
-      }
+  const handleStop = (vm) => {
+    // Logique pour arrêter la VM
+    const updatedVMs = vms.map((v) =>
+      v.hostname === vm.hostname ? { ...v, status: 'Stopped' } : v
+    );
+    setVms(updatedVMs);
+    localStorage.setItem('vms', JSON.stringify(updatedVMs));
+    console.log(`Stopping VM: ${vm.hostname}`);
+  };
 
-      const response = await fetch("http://localhost:5000/start-vm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestData),
-      });
-      const data = await response.json();
-      if (response.ok) {
-        alert(`✅ ${data.message}`);
-        // Optionnel: Mettre à jour la machine dans localStorage ou rafraîchir le dashboard
-      } else {
-        alert(`❌ Erreur: ${data.error}`);
-      }
-    } catch (error) {
-      console.error("Erreur de requête:", error);
-      alert("Erreur lors de la communication avec le serveur.");
+  const handleConsole = (ip) => {
+    // Ouvrir le terminal SSH
+    window.open(`ssh://user@${ip}`, '_blank'); // Remplacez 'user' par le nom d'utilisateur approprié
+    console.log(`Connecting to VM via SSH: ssh://user@${ip}`);
+  };
+
+  const handleDelete = (hostname) => {
+    // Demander une confirmation avant de supprimer la VM
+    if (window.confirm(`Are you sure you want to delete the VM ${hostname}?`)) {
+      const updatedVMs = vms.filter(vm => vm.hostname !== hostname);
+      setVms(updatedVMs);
+      localStorage.setItem('vms', JSON.stringify(updatedVMs));
+      console.log(`Deleted VM: ${hostname}`);
     }
   };
 
- 
-  const handleStop = async (machine) => {
-    try {
-      // On construit l'objet de requête, incluant le mode et, pour distant, les infos de connexion.
-      const requestData = {
-        mode: machine.mode || "local",  // Par défaut "local"
-        vm_name: machine.hostname,
-      };
-
-      if (machine.mode === "distant") {
-        // Assurez-vous que les informations de connexion pour le mode distant sont présentes
-        if (!machine.remote_ip) {
-          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
-          return;
-        }
-        requestData.remote_ip = machine.remote_ip;
-        requestData.remote_user = machine.remote_user;
-        requestData.remote_password = machine.remote_password;
-        requestData.remote_os = machine.remote_os;
-      }
-
-      const response = await fetch("http://localhost:5000/stop-vm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestData),
-      });
-      const data = await response.json();
-      if (response.ok) {
-        alert(`✅ ${data.message}`);
-        // Optionnel: Mettre à jour la machine dans localStorage ou rafraîchir le dashboard
-      } else {
-        alert(`❌ Erreur: ${data.error}`);
-      }
-    } catch (error) {
-      console.error("Erreur de requête:", error);
-      alert("Erreur lors de la communication avec le serveur.");
-    }
-  };
-  
-  const handleDelete = async (machine, index) => {
-    try {
-      console.log("Machine à supprimer:", machine);
-      // Utilisez une clé cohérente : ici, on vérifie d'abord vm_name, puis hostname
-      const vmName = machine.hostname;
-      if (!vmName) {
-        alert("Erreur: Le nom de la VM n'est pas défini.");
-        return;
-      }
-
-      const requestData = {
-        mode: machine.mode || "local",
-        vm_name: vmName,
-      };
-      console.log(machine);
-      if (machine.mode === "distant") {
-        if (!machine.remote_ip) {
-          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
-          return;
-        }
-        requestData.remote_ip = machine.remote_ip;
-        requestData.remote_user = machine.remote_user;
-        requestData.remote_password = machine.remote_password;
-        requestData.remote_os = machine.remote_os;
-      }
-
-      const response = await fetch("http://localhost:5000/delete-vm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestData),
-      });
-      const data = await response.json();
-      if (response.ok) {
-        alert(`✅ ${data.message}`);
-        const updatedMachines = machines.filter((_, idx) => idx !== index);
-        localStorage.setItem("vms", JSON.stringify(updatedMachines));
-        setMachines(updatedMachines);
-      } else {
-        alert(`❌ Erreur: ${data.error}`);
-      }
-    } catch (error) {
-      console.error("Erreur de requête:", error);
-      alert("Erreur lors de la communication avec le serveur.");
-    }
-  };
-
-  const handleOpenTerminal = async (machine) => {
-    try {
-      const requestData = {
-        mode: machine.mode || "local",
-        vm_name: machine.hostname,
-      };
-      if (machine.mode === "distant") {
-        if (!machine.remote_ip) {
-          alert("Pour le mode distant, veuillez renseigner l'adresse IP de la machine distante.");
-          return;
-        }
-        requestData.remote_ip = machine.remote_ip;
-        requestData.remote_user = machine.remote_user;
-        requestData.remote_password = machine.remote_password;
-        requestData.remote_os = machine.remote_os;
-      }
-      const response = await fetch("http://localhost:5000/open-terminal-vm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestData),
-      });
-      const data = await response.json();
-      if (response.ok) {
-        // Afficher la configuration SSH (ou ouvrir une nouvelle fenêtre si une solution web SSH est intégrée)
-        alert(`SSH Configuration:\n${data.sshConfig}`);
-      } else {
-        alert(`❌ Erreur: ${data.error}`);
-      }
-    } catch (error) {
-      console.error("Erreur de requête:", error);
-      alert("Erreur lors de la communication avec le serveur.");
-    }
-  };
-  const filteredMachines = machines.filter((machine) =>
-    machine.hostname.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-  // Fonction pour déterminer la couleur du statut
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'running':
-        return 'text-green-500';
-      case 'poweroff':
-        return 'text-red-500';
-      case 'Non autorisé':
-        return 'text-orange-500';
-      default:
-        return 'text-gray-500';
-    }
-  };
   return (
-    <div className="p-6 bg-gradient-to-b from-teal-100 to-white min-h-screen">
-      <h1 className="text-4xl font-bold text-center text-teal-600">Dashboard</h1>
-      <div className="flex justify-end p-4">
-        <input
-          type="text"
-          placeholder="Search..."
-          className="p-2 border rounded-md"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-        />
-      </div>
-      <table className="min-w-full border-collapse border border-gray-300 rounded-lg">
-        <thead>
-          <tr className="bg-gray-100">
-            <th className="p-3 border">Host Name</th>
-            <th className="p-3 border">Box</th>
-            <th className="p-3 border">Network</th>
-            <th className="p-3 border">RAM</th>
-            <th className="p-3 border">CPU</th>
-            <th className="p-3 border">Status</th>
-            <th className="p-3 border">Date of Creation</th>
-            <th className="p-3 border">SSH Address</th>
-            <th className="p-3 border">Mode</th>
-            <th className="p-3 border">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filteredMachines.map((machine, index) => (
-            <tr key={index} className="text-center border-b">
-              <td className="p-3 border">{machine.hostname}</td>
-              <td className="p-3 border">{machine.box}</td>
-              <td className="p-3 border">{machine.network}</td>
-              <td className="p-3 border">{machine.ram}</td>
-              <td className="p-3 border">{machine.cpu}</td>
-              <td className={`p-3 border font-semibold ${getStatusColor(machine.status)}`}>
-                {machine.status}
-              </td>
-              <td className="p-3 border">{machine.date}</td>
-              <td className="p-3 border">{machine.ipAddress}:{machine.port}</td>
-              <td className="p-3 border">{machine.mode} 
-</td>
-              
-              <td className="p-3 border flex justify-around">
-                <button onClick={() => handleStart(machine)} className="text-green-500 hover:text-green-700">▶</button>
-                <button onClick={() => handleStop(machine)} className="text-yellow-500 hover:text-yellow-700">■</button>
-                <button onClick={() => handleOpenTerminal(machine)} className="text-blue-500 hover:text-blue-700">⎘</button>
-                <button onClick={() => handleDelete(machine)} className="text-red-500 hover:text-red-700">✖</button>
-              </td>
+    <div className="min-h-screen p-4 bg-gradient-to-b from-teal-100 to-white">
+      <h1 className="text-4xl font-bold text-teal-600 mb-6">Dashboard</h1>
+      <div className="overflow-x-auto">
+        <table className="min-w-full bg-white border border-gray-300">
+          <thead>
+            <tr className="bg-teal-500 text-white">
+              <th className="py-2 px-4 border">Hostname</th>
+              <th className="py-2 px-4 border">Template</th>
+              <th className="py-2 px-4 border">Network</th>
+              <th className="py-2 px-4 border">RAM (Mo)</th>
+              <th className="py-2 px-4 border">CPU</th>
+              <th className="py-2 px-4 border">Status</th>
+              <th className="py-2 px-4 border">Creation Date</th>
+              <th className="py-2 px-4 border">Actions</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {vms.map((vm, index) => (
+              <tr key={index} className="hover:bg-gray-100">
+                <td className="py-2 px-4 border">{vm.hostname}</td>
+                <td className="py-2 px-4 border">{vm.template}</td>
+                <td className="py-2 px-4 border">{vm.network}</td>
+                <td className="py-2 px-4 border">{vm.ram}</td>
+                <td className="py-2 px-4 border">{vm.cpu}</td>
+                <td className="py-2 px-4 border">{vm.status}</td>
+                <td className="py-2 px-4 border">{vm.creationDate}</td>
+                <td className="py-2 px-4 border">
+                  <button
+                    onClick={() => handleStart(vm)}
+                    className="bg-green-500 text-white px-2 py-1 rounded mr-2 hover:bg-green-600"
+                  >
+                    Start
+                  </button>
+                  <button
+                    onClick={() => handleStop(vm)}
+                    className="bg-red-500 text-white px-2 py-1 rounded mr-2 hover:bg-red-600"
+                  >
+                    Stop
+                  </button>
+                  <button
+                    onClick={() => handleConsole(vm.ip)}
+                    className="bg-blue-500 text-white px-2 py-1 rounded mr-2 hover:bg-blue-600"
+                  >
+                    Console
+                  </button>
+                  <button
+                    onClick={() => handleDelete(vm.hostname)}
+                    className="bg-gray-500 text-white px-2 py-1 rounded hover:bg-gray-600"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
-
-
 };
 
 export default Dashboard;

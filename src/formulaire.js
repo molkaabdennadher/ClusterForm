@@ -1,123 +1,73 @@
-import React, { useState, useEffect } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import React, { useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 
-export default function Formulaire() {
-  const [hostname, setHostname] = useState("");
-  const [box, setBox] = useState("ubuntu/trusty64");
-  const [ram, setRam] = useState(2);
-  const [totalMemoryGB, setMaxRam] = useState(16);
-  const [cpu, setCpu] = useState(1);
-  const [maxCpu, setMaxCpu] = useState(8);
-  const [network, setNetwork] = useState("NAT");
-  const [submitted, setSubmitted] = useState(false);
-  const [ipAddress, setIpAddress] = useState("");
-  const [port, setPort] = useState("");
+const Formulaire = () => {
+  const location = useLocation();
+  const { proxmoxIp, nodeName, user, password } = location.state || {};
+
+  const [hostname, setHostname] = useState('');
+  const [ram, setRam] = useState(2048); // Valeur par défaut
+  const [cpu, setCpu] = useState(1); // Valeur par défaut
+  const [network, setNetwork] = useState('nat'); // Valeur par défaut
+  const [template, setTemplate] = useState('ubuntu'); // Valeur par défaut
 
   const navigate = useNavigate();
-  const location = useLocation();
-  const remoteConfig = location.state || {};
-  const isRemote = remoteConfig.mode === "distant";
 
-  useEffect(() => {
-    if (!isRemote) {
-      fetch("http://localhost:5000/get-cpu-info")
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.maxCpu) setMaxCpu(data.maxCpu);
-          if (data.totalMemoryGB) setMaxRam(data.totalMemoryGB);
-          console.log("System info:", data);
-        })
-        .catch((err) => console.error("Erreur lors de la récupération des infos système:", err));
-    }
-    else {
-      console.log("Mode distant");
-      // Pour le mode distant, on appelle l'endpoint pour récupérer les infos système de la machine distante.
-      fetch("http://localhost:5000/get-remote-cpu-info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          remote_ip: remoteConfig.remote_ip,
-          remote_user: remoteConfig.remote_user,
-          remote_password: remoteConfig.remote_password,
-          remote_os: remoteConfig.remote_os,
-        }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.maxCpu) setMaxCpu(data.maxCpu);
-          if (data.totalMemoryGB) setMaxRam(data.totalMemoryGB);
-          console.log("Remote system info:", data);
-        })
-        .catch((err) =>
-          console.error("Erreur lors de la récupération des infos système distantes:", err)
-        ); }
-      
-  }, [isRemote]);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-
-    if (!hostname.trim()) {
-      alert("Le champ Hostname est requis.");
-      return;
-    }
-
-    const requestData = {
-      vm_name: hostname,
-      box: box,
-      ram: ram,
-      cpu: cpu,
-      network: network
+  const handleCreate = async () => {
+    // Crée une VM fictive avant d'attendre la réponse de l'API
+    const newVM = {
+      hostname,
+      ram,
+      cpu,
+      network,
+      template,
+      status: 'Creating...', // Statut temporaire
     };
 
-    if (isRemote) {
-      requestData.remote_ip = remoteConfig.remote_ip;
-      requestData.remote_password = remoteConfig.remote_password;
-      requestData.mail = remoteConfig.mail; 
-      requestData.remote_user = remoteConfig.remote_user; // Transmet le login reçu depuis DistantConfig
-      requestData.remote_os = remoteConfig.remote_os;
-      requestData.hypervisor = remoteConfig.hypervisor;
-    }
+    // Ajoute cette VM à une "liste des VMs" (stockée dans l'état)
+    const currentVMs = JSON.parse(localStorage.getItem('vms')) || [];
+    currentVMs.push(newVM);
+    localStorage.setItem('vms', JSON.stringify(currentVMs));
+
+    // Redirige vers le dashboard (affichera la VM même avant la réponse de l'API)
+    navigate('/dashboard');
 
     try {
-      const endpoint = isRemote
-        ? "http://localhost:5000/create-vm-remote"
-        : "http://localhost:5000/create-vm";
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestData),
-      });
-      const data = await response.json();
-
-      if (response.ok) {
-        setIpAddress(data.ipAddress);
-        setPort(data.port);
-        setSubmitted(true);
-
-        const newMachine = {
+      const response = await fetch('http://localhost:5000/create_vm', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          proxmoxIp: proxmoxIp,
+          proxmoxPassword: password,
           hostname: hostname,
-          box: box,
+          ram: parseInt(ram, 10),
+          cpu: parseInt(cpu, 10),
+          targetNode: nodeName,
           network: network,
-          ram: `${ram} GB`,
-          cpu: `${cpu} vCPUs`,
-          status: "Running",
-          date: new Date().toLocaleDateString(),
-          ipAddress: data.ipAddress,
-          port: data.port,
-          mode: remoteConfig.mode || "local"
-        };
+        }),
+      });
 
-        const storedMachines = JSON.parse(localStorage.getItem("vms")) || [];
-        const updatedMachines = [...storedMachines, newMachine];
-        localStorage.setItem("vms", JSON.stringify(updatedMachines));
-        window.dispatchEvent(new Event("storage"));
-      } else {
-        alert(`❌ Erreur: ${data.error}`);
+      if (!response.ok) {
+        throw new Error('Erreur lors de la création de la VM');
       }
+
+      const result = await response.json();
+      console.log(result.message);
+
+      // Si la création de la VM réussit, mettez à jour son statut dans la liste
+      const updatedVMs = currentVMs.map((vm) =>
+        vm.hostname === hostname ? { ...vm, status: 'Created' } : vm
+      );
+      localStorage.setItem('vms', JSON.stringify(updatedVMs));
     } catch (error) {
-      console.error("Erreur de requête:", error);
-      alert("Erreur lors de la communication avec le serveur.");
+      console.error('Erreur:', error);
+      // Si l'API échoue, vous pouvez également mettre à jour le statut de la VM en "Erreur"
+      const updatedVMs = currentVMs.map((vm) =>
+        vm.hostname === hostname ? { ...vm, status: 'Error' } : vm
+      );
+      localStorage.setItem('vms', JSON.stringify(updatedVMs));
     }
   };
 
@@ -131,80 +81,69 @@ export default function Formulaire() {
           Dashboard
         </button>
       </div>
-      <h1 className="text-4xl font-bold text-teal-600 mb-6">
-        Create a Virtual Machine ({isRemote ? "Distant Mode" : "Local Mode"})
-      </h1>
-      {!submitted ? (
-        <form onSubmit={handleSubmit} className="bg-white p-6 rounded-lg shadow-lg w-96">
-          <label className="block text-sm font-medium">Host name:</label>
-          <input
-            type="text"
-            value={hostname}
-            onChange={(e) => setHostname(e.target.value)}
-            placeholder="Enter your host name"
-            className="w-full p-2 border rounded mb-4"
-            required
-          />
+      <h1 className="text-4xl font-bold text-teal-600 mb-6">Create VM</h1>
+      <div className="bg-white p-6 rounded-lg shadow-lg w-96">
+        <label className="block text-sm font-medium">Hostname:</label>
+        <input
+          type="text"
+          placeholder="Enter Hostname"
+          value={hostname}
+          onChange={(e) => setHostname(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+          required
+        />
 
-          <label className="block text-sm font-medium">Box:</label>
-          <select
-            value={box}
-            onChange={(e) => setBox(e.target.value)}
-            className="w-full p-2 border rounded mb-4"
-          >
-            <option>ubuntu/trusty64</option>
-            <option>laravel/homestead</option>
-            <option>hashicorp/precise64</option>
-            <option>centos/7</option>
-            <option>debian/jessie64</option>
-            <option>hashicorp/precise32</option>
-            <option>scotch/box</option>
-          </select>
+        <label className="block text-sm font-medium">RAM (Mo):</label>
+        <input
+          type="number"
+          placeholder="Enter RAM"
+          value={ram}
+          onChange={(e) => setRam(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+          required
+        />
 
-          <label className="block text-sm font-medium">RAM: {ram} GB</label>
-          <input
-            type="range"
-            min="2"
-            max={totalMemoryGB}
-            step="2"
-            value={ram}
-            onChange={(e) => setRam(Number(e.target.value))}
-            className="w-full mb-4"
-          />
+        <label className="block text-sm font-medium">CPU:</label>
+        <input
+          type="number"
+          placeholder="Enter CPU Cores"
+          value={cpu}
+          onChange={(e) => setCpu(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+          required
+        />
 
-          <label className="block text-sm font-medium">CPU: {cpu} vCPUs</label>
-          <input
-            type="range"
-            min="1"
-            max={maxCpu} // la valeur maximale récupérée du back
-            step="1"
-            value={cpu}
-            onChange={(e) => setCpu(Number(e.target.value))}
-          />
+        <label className="block text-sm font-medium">Network:</label>
+        <select
+          value={network}
+          onChange={(e) => setNetwork(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+        >
+          <option value="nat">NAT</option>
+          <option value="bridged">Bridged</option>
+          <option value="private">Private Network</option>
+        </select>
 
-          <label className="block text-sm font-medium">Network:</label>
-          <select
-            value={network}
-            onChange={(e) => setNetwork(e.target.value)}
-            className="w-full p-2 border rounded mb-4"
-          >
-            <option>NAT</option>
-            <option>Bridged Adapter</option>
-            <option>Internal Network</option>
-            <option>Host-only Adapter</option>
-          </select>
+        <label className="block text-sm font-medium">Template:</label>
+        <select
+          value={template}
+          onChange={(e) => setTemplate(e.target.value)}
+          className="w-full p-2 border rounded mb-4"
+        >
+          <option value="ubuntu">Ubuntu</option>
+          <option value="windows">Windows</option>
+        </select>
 
-          <button type="submit" className="w-full bg-teal-500 text-white p-2 rounded-lg shadow-md hover:bg-teal-600">
-            Create
-          </button>
-        </form>
-      ) : (
-        <div className="success-message text-center mt-6">
-          <h2 className="text-2xl font-bold text-teal-600">✅ Machine created successfully!</h2>
-          <p className="text-lg text-gray-700">SSH address: {ipAddress}:{port}</p>
-          <p className="text-gray-600">Utilisez cette adresse pour vous connecter via SSH.</p>
-        </div>
-      )}
+        <button
+          type="button"
+          onClick={handleCreate}
+          className="w-full bg-teal-500 text-white p-2 rounded-lg shadow-md hover:bg-teal-600"
+        >
+          Create
+        </button>
+      </div>
     </div>
   );
-}
+};
+
+export default Formulaire;
