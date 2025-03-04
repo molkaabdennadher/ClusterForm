@@ -14,33 +14,6 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
-@app.route('/get-vm-status', methods=['POST'])
-def get_vm_status():
-    data = request.get_json()
-    vm_name = data.get('vm_name')
-    mode = data.get('mode', 'local').lower()
-
-    if mode == 'local':
-        try:
-            vm_path = os.path.join(".", "vms", vm_name)
-            if not os.path.exists(vm_path):
-                return jsonify({"error": "VM non trouvée"}), 404
-            result = subprocess.check_output(
-                ["vagrant", "status"], 
-                cwd=vm_path, 
-                universal_newlines=True,
-                stderr=subprocess.STDOUT
-            )
-            state_line = [line for line in result.splitlines() if line.strip().startswith("Current state:")]
-            if state_line:
-                state = state_line[0].split(': ')[1]
-                return jsonify({"status": state}), 200
-            else:
-                return jsonify({"status": "Statut inconnu"}), 200
-        except subprocess.CalledProcessError as e:
-            return jsonify({"status": "Erreur"}), 200
-    else:
-        return jsonify({"status": "Not allowed"}), 200
 @app.route('/get-remote-cpu-info', methods=['POST'])
 def get_remote_cpu_info():
     """
