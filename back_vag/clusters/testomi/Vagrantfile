@@ -1,0 +1,32 @@
+Vagrant.configure("2") do |config|
+  config.vm.define "m11" do |machine|
+    machine.vm.box = "None"
+    machine.vm.hostname = "m11"
+    machine.vm.network "private_network", ip: "192.168.0.125"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "m11"
+      vb.memory = "4096"
+      vb.cpus = 2
+    end
+  end
+  config.vm.define "m12" do |machine|
+    machine.vm.box = "None"
+    machine.vm.hostname = "m12"
+    machine.vm.network "private_network", ip: "192.168.0.126"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "m12"
+      vb.memory = "4096"
+      vb.cpus = 2
+    end
+  end
+  config.vm.define "m13" do |machine|
+    machine.vm.box = "None"
+    machine.vm.hostname = "m13"
+    machine.vm.network "private_network", ip: "192.168.0.127"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "m13"
+      vb.memory = "4096"
+      vb.cpus = 2
+    end
+  end
+end

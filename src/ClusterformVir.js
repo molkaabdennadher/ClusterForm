@@ -4,13 +4,14 @@ import { useLocation, useNavigate } from "react-router-dom";
 export default function ClusterFormVir() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { clusterName, clusterDescription, nodeCount, clusterType } = location.state;
+  // Récupération des données globales du cluster transmises depuis ClusterVir
+  const { clusterName, clusterDescription, nodeCount, clusterType, clusterIp, gateway, nameservers } = location.state;
 
   const [currentNode, setCurrentNode] = useState(0);
   const [nodeDetails, setNodeDetails] = useState(
     Array.from({ length: nodeCount }, () => ({
       hostname: "",
-      osVersion: "ubuntu-trusty24",
+      osVersion: "ubuntu/bionic64",
       ram: 4,
       cpu: 2,
       ip: "",
@@ -33,6 +34,7 @@ export default function ClusterFormVir() {
     e.preventDefault();
 
     if (currentNode < nodeCount - 1) {
+      // Passer au formulaire du nœud suivant
       setCurrentNode(currentNode + 1);
       setNodeDetails((prev) => {
         const updatedDetails = [...prev];
@@ -48,15 +50,40 @@ export default function ClusterFormVir() {
         return updatedDetails;
       });
     } else {
-      navigate("/ClusterDashVir", {
-        state: {
-          clusterName,
-          clusterDescription,
-          nodeCount,
-          clusterType,
-          nodeDetails,
+      // Au dernier nœud, rassembler toutes les données et appeler l'API
+      const clusterData = {
+        clusterName,
+        clusterDescription,
+        clusterIp,
+        nodeCount,
+        clusterType,
+        gateway, // passerelle
+        nameservers: nameservers.split(",").map((ns) => ns.trim()),
+        nodeDetails,
+      };
+
+      fetch("http://localhost:5000/create_cluster", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-      });
+        body: JSON.stringify(clusterData),
+      })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error("Erreur lors de la création du cluster");
+          }
+          return response.json();
+        })
+        .then((data) => {
+          console.log("Cluster créé:", data);
+          // Rediriger vers le dashboard ou afficher un message de succès
+          navigate("/ClusterDashVir", { state: data });
+        })
+        .catch((error) => {
+          console.error("Erreur:", error);
+          // Vous pouvez afficher un message d'erreur ici
+        });
     }
   };
 
@@ -89,7 +116,7 @@ export default function ClusterFormVir() {
           onChange={(e) => handleNodeDetailsChange("osVersion", e.target.value)}
           className="w-full p-2 border rounded mb-4"
         >
-          <option value="ubuntu-trusty24">Ubuntu-trusty 24</option>
+          <option value="ubuntu/trusty64">ubuntu/trusty64</option>
           <option value="ubuntu-focal">Ubuntu-focal</option>
           <option value="ubuntu-bionic">Ubuntu-bionic</option>
         </select>
@@ -122,7 +149,8 @@ export default function ClusterFormVir() {
           value={nodeDetails[currentNode].ip}
           onChange={(e) => handleNodeDetailsChange("ip", e.target.value)}
           className="w-full p-2 border rounded mb-4"
-          placeholder={`IP address`}
+          placeholder={`IP address for node ${currentNode + 1}`}
+          required
         />
 
         <label className="block text-sm font-medium mb-2">Node Description:</label>
@@ -168,7 +196,7 @@ export default function ClusterFormVir() {
           type="submit"
           className="w-full bg-teal-500 text-white p-2 rounded-lg shadow-md hover:bg-teal-600"
         >
-          {currentNode < nodeCount - 1 ? "Next" : "Submit Form"}
+          {currentNode < nodeCount - 1 ? "Next" : "Submit Cluster"}
         </button>
       </form>
     </div>

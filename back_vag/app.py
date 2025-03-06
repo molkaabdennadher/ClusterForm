@@ -9,6 +9,7 @@ import random
 import shutil
 import platform
 import smtplib
+import tempfile
 from email.message import EmailMessage
 from flask_cors import CORS
 
@@ -583,7 +584,7 @@ def create_vm_remote():
         network_config = ""
         ip_address_generated = ""
         if network != "NAT":
-            ip_address_generated = f"192.168.56.{random.randint(2,254)}"
+            ip_address_generated = f"192.168.0.{random.randint(2,254)}"
             network_config = f'  config.vm.network "private_network", ip: "{ip_address_generated}"\n'
 
         vagrantfile_content = f"""Vagrant.configure("2") do |config|
@@ -724,5 +725,88 @@ end
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+###################################################################################################################
+###############################################CLUSTER HADOOP######################################################
+def get_cluster_folder(cluster_name):
+    """
+    Crée (si nécessaire) et retourne le chemin vers le dossier dédié au cluster.
+    Le dossier sera situé dans 'clusters/<cluster_name>'.
+    """
+    base_folder = "clusters"
+    if not os.path.exists(base_folder):
+        os.makedirs(base_folder)
+    folder = os.path.join(base_folder, cluster_name)
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+def generate_vagrantfile(cluster_data):
+    """
+    Génère un Vagrantfile dynamique pour le cluster.
+    Pour chaque nœud, on définit :
+      - La box (ici par défaut "ubuntu/bionic64" ou tel que transmis)
+      - Le hostname (tel que saisi dans le formulaire)
+      - Une interface réseau en private_network avec l'IP fixée
+      - Les ressources (mémoire et CPU) avec une personnalisation du nom via vb.customize
+    """
+    node_details = cluster_data.get("nodeDetails", [])
+    vagrantfile = 'Vagrant.configure("2") do |config|\n'
+    for node in node_details:
+        hostname = node.get("hostname")
+        os_version = node.get("osVersion", "ubuntu/bionic64")
+        ram = node.get("ram", 4)    # en GB
+        cpu = node.get("cpu", 2)
+        ip = node.get("ip")
+        ram_mb = int(ram * 1024)
+        
+        vagrantfile += f'''  config.vm.define "{hostname}" do |machine|
+    machine.vm.box = "{os_version}"
+    machine.vm.hostname = "{hostname}"
+    machine.vm.network "private_network", ip: "{ip}"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "{hostname}"
+      vb.customize ["modifyvm", :id, "--name", "{hostname}"]
+      vb.memory = "{ram_mb}"
+      vb.cpus = {cpu}
+    end
+  end\n'''
+    vagrantfile += "end\n"
+    return vagrantfile
+###################################################################################################################
+@app.route('/create_cluster', methods=['POST'])
+def create_cluster():
+    # Récupération des données JSON envoyées par le front-end
+    cluster_data = request.get_json()
+    if not cluster_data:
+        return jsonify({"error": "No data received"}), 400
+
+    cluster_name = cluster_data.get("clusterName")
+    if not cluster_name:
+        return jsonify({"error": "Cluster name is required"}), 400
+
+    # Création d'un dossier dédié pour le cluster
+    cluster_folder = get_cluster_folder(cluster_name)
+
+    # Génération du Vagrantfile
+    vagrantfile_content = generate_vagrantfile(cluster_data)
+    vagrantfile_path = os.path.join(cluster_folder, "Vagrantfile")
+    try:
+        with open(vagrantfile_path, "w") as vf:
+            vf.write(vagrantfile_content)
+    except Exception as e:
+        return jsonify({"error": "Error writing Vagrantfile", "details": str(e)}), 500
+
+    # Exécuter "vagrant up" dans le dossier dédié afin que le Vagrantfile soit utilisé
+    try:
+        subprocess.run(["vagrant", "up"], cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error during 'vagrant up'", "details": str(e)}), 500
+
+    return jsonify({
+        "message": "Cluster created successfully",
+        "cluster_folder": cluster_folder
+    }), 200
+
+
+    
 if __name__ == '__main__':
     app.run(debug=True)
