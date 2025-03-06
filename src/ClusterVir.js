@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 const ClusterVir = () => {
   const [clusterName, setClusterName] = useState("");
   const [clusterDescription, setClusterDescription] = useState("");
+  const [clusterIp, setClusterIp] = useState("");
   const [nodeCount, setNodeCount] = useState(1);
   const [clusterType, setClusterType] = useState({
     Ha: false,
@@ -73,12 +74,22 @@ const ClusterVir = () => {
           className="w-full p-2 border rounded mb-4"
           required
         />
+        {/* Cluster ip plage */}
+        <label className="block text-sm font-medium mb-2">Cluster ip address:</label>
+        <input
+          type="text"
+          value={clusterIp}
+          onChange={(e) => setClusterIp(e.target.value)}
+          placeholder="Enter cluster ip address"
+          className="w-full p-2 border rounded mb-4"
+          required
+        />
 
         {/* Number of Nodes */}
         <label className="block text-sm font-medium mb-2">Number of Nodes: {nodeCount}</label>
         <input
           type="range"
-          min="1"
+          min="3"
           max="10"
           value={nodeCount}
           onChange={(e) => setNodeCount(e.target.value)}

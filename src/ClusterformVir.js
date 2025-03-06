@@ -1,26 +1,19 @@
 import React, { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-export default function ClusterformVir() {
-  const [osVersion, setOsVersion] = useState("ubuntu-trusty24");
-  const [ram, setRam] = useState(4);
-  const [cpu, setCpu] = useState(2);
-  const [totalMemoryGB, setMaxRam] = useState(16);
-  const [maxCpu, setMaxCpu] = useState(8);
-  const [network, setNetwork] = useState("NAT");
-  const [hostname, setHostname] = useState("");
-  const [currentNode, setCurrentNode] = useState(0);
+export default function ClusterFormVir() {
   const location = useLocation();
   const navigate = useNavigate();
   const { clusterName, clusterDescription, nodeCount, clusterType } = location.state;
 
+  const [currentNode, setCurrentNode] = useState(0);
   const [nodeDetails, setNodeDetails] = useState(
     Array.from({ length: nodeCount }, () => ({
       hostname: "",
       osVersion: "ubuntu-trusty24",
       ram: 4,
       cpu: 2,
-      network: "NAT",
+      ip: "",
       nodeDescription: "",
       isNameNode: false,
       isResourceManager: false,
@@ -39,20 +32,14 @@ export default function ClusterformVir() {
   const handleSubmit = (e) => {
     e.preventDefault();
 
-    // Si le nœud actuel est le dernier, naviguer vers le tableau de bord
     if (currentNode < nodeCount - 1) {
       setCurrentNode(currentNode + 1);
-      // Réinitialiser les valeurs pour le nœud suivant
-      setHostname("");
-      setOsVersion("ubuntu-trusty24");
-      setRam(4);
-      setCpu(2);
-      setNetwork("NAT");
       setNodeDetails((prev) => {
         const updatedDetails = [...prev];
         updatedDetails[currentNode + 1] = {
           ...updatedDetails[currentNode + 1],
           hostname: "",
+          ip: "",
           nodeDescription: "",
           isNameNode: false,
           isResourceManager: false,
@@ -61,7 +48,6 @@ export default function ClusterformVir() {
         return updatedDetails;
       });
     } else {
-      // Naviguer vers le tableau de bord avec les détails des nœuds
       navigate("/ClusterDashVir", {
         state: {
           clusterName,
@@ -112,7 +98,7 @@ export default function ClusterformVir() {
         <input
           type="range"
           min="2"
-          max={totalMemoryGB}
+          max="16"
           step="2"
           value={nodeDetails[currentNode].ram}
           onChange={(e) => handleNodeDetailsChange("ram", Number(e.target.value))}
@@ -123,23 +109,21 @@ export default function ClusterformVir() {
         <input
           type="range"
           min="1"
-          max={maxCpu}
+          max="8"
           step="1"
           value={nodeDetails[currentNode].cpu}
           onChange={(e) => handleNodeDetailsChange("cpu", Number(e.target.value))}
           className="w-full mb-4"
         />
 
-        <label className="block text-sm font-medium mb-2">Network:</label>
-        <select
-          value={nodeDetails[currentNode].network}
-          onChange={(e) => handleNodeDetailsChange("network", e.target.value)}
+        <label className="block text-sm font-medium mb-2">IP:</label>
+        <input
+          type="text"
+          value={nodeDetails[currentNode].ip}
+          onChange={(e) => handleNodeDetailsChange("ip", e.target.value)}
           className="w-full p-2 border rounded mb-4"
-        >
-          <option value="NAT">NAT</option>
-          <option value="Bridged">Bridged</option>
-          <option value="Private">Private Network</option>
-        </select>
+          placeholder={`IP address`}
+        />
 
         <label className="block text-sm font-medium mb-2">Node Description:</label>
         <input
