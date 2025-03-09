@@ -1,0 +1,21 @@
+---
+- hosts: namenode
+  become: yes
+  vars:
+    hadoop_version: "3.3.1"
+    hadoop_url: "https://downloads.apache.org/hadoop/common/hadoop-{{ hadoop_version }}/hadoop-{{ hadoop_version }}.tar.gz"
+  tasks:
+    - name: Download Hadoop archive on NameNode
+      get_url:
+        url: "{{ hadoop_url }}"
+        dest: "/tmp/hadoop.tar.gz"
+        mode: '0644'
+    - name: Extract Hadoop archive on NameNode
+      unarchive:
+        src: "/tmp/hadoop.tar.gz"
+        dest: "/opt/"
+        remote_src: yes
+      notify: Set Hadoop ownership
+  handlers:
+    - name: Set Hadoop ownership
+      command: chown -R vagrant:vagrant /opt/hadoop-{{ hadoop_version }}

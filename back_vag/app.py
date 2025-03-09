@@ -854,6 +854,7 @@ def create_cluster():
     if not namenode:
         return jsonify({"error": "No NameNode defined"}), 400
     namenode_hostname = namenode.get("hostname")
+    namenode_ip = namenode.get("ip")  # pour le copier-coller de Hadoop
 
     # a. Installer Ansible sur le NameNode (s'il n'est pas déjà installé)
     try:
@@ -887,13 +888,31 @@ def create_cluster():
             except subprocess.CalledProcessError as e:
                 return jsonify({"error": f"Error configuring SSH on node {target_hostname}", "details": str(e)}), 500
 
+    # 6. Installation de Hadoop sur le NameNode, copie de l'installation sur les autres nœuds,
+   
+    # Installer Java et net-tools et configurer les variables d'environnement sur tous les nœuds
+    for node in node_details:
+        target_hostname = node.get("hostname")
+        try:
+            install_java_net_cmd = (
+                f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools"'
+            )
+            subprocess.run(install_java_net_cmd, shell=True, cwd=cluster_folder, check=True)
+            configure_env_cmd = (
+                f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
+                #f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
+                f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
+            )
+            subprocess.run(configure_env_cmd, shell=True, cwd=cluster_folder, check=True)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": f"Error installing Java/net or configuring environment on node {target_hostname}", "details": str(e)}), 500
+
     return jsonify({
-        "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, and SSH configured on other nodes",
+        "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, SSH configured, "
+                   "Hadoop installed and copied, Java and net-tools installed and environment variables configured",
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path
     }), 200
-
-
     
 if __name__ == '__main__':
     app.run(debug=True)
