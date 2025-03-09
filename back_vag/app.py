@@ -733,8 +733,7 @@ def get_cluster_folder(cluster_name):
     Le dossier sera situé dans 'clusters/<cluster_name>'.
     """
     base_folder = "clusters"
-    if not os.path.exists(base_folder):
-        os.makedirs(base_folder)
+    os.makedirs(base_folder, exist_ok=True)
     folder = os.path.join(base_folder, cluster_name)
     os.makedirs(folder, exist_ok=True)
     return folder
@@ -765,6 +764,9 @@ def generate_vagrantfile(cluster_data):
     machine.vm.provider "virtualbox" do |vb|
       vb.name = "{hostname}"
       vb.customize ["modifyvm", :id, "--name", "{hostname}"]
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+
       vb.memory = "{ram_mb}"
       vb.cpus = {cpu}
     end
@@ -774,7 +776,7 @@ def generate_vagrantfile(cluster_data):
 ###################################################################################################################
 @app.route('/create_cluster', methods=['POST'])
 def create_cluster():
-    # Récupération des données JSON envoyées par le front-end
+    # 1. Récupérer les données envoyées par le front-end
     cluster_data = request.get_json()
     if not cluster_data:
         return jsonify({"error": "No data received"}), 400
@@ -783,10 +785,10 @@ def create_cluster():
     if not cluster_name:
         return jsonify({"error": "Cluster name is required"}), 400
 
-    # Création d'un dossier dédié pour le cluster
+    # Création du dossier dédié pour le cluster
     cluster_folder = get_cluster_folder(cluster_name)
 
-    # Génération du Vagrantfile
+    # 2. Génération et écriture du Vagrantfile dans le dossier dédié
     vagrantfile_content = generate_vagrantfile(cluster_data)
     vagrantfile_path = os.path.join(cluster_folder, "Vagrantfile")
     try:
@@ -795,15 +797,100 @@ def create_cluster():
     except Exception as e:
         return jsonify({"error": "Error writing Vagrantfile", "details": str(e)}), 500
 
-    # Exécuter "vagrant up" dans le dossier dédié afin que le Vagrantfile soit utilisé
+    # 3. Lancement des VMs via 'vagrant up' dans le dossier du cluster
     try:
         subprocess.run(["vagrant", "up"], cwd=cluster_folder, check=True)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error during 'vagrant up'", "details": str(e)}), 500
 
+    # 4. Génération de l'inventaire Ansible
+    node_details = cluster_data.get("nodeDetails", [])
+    inventory_lines = []
+    namenode_lines = []
+    resourcemanager_lines = []
+    datanodes_lines = []
+    nodemanagers_lines = []
+    
+    for node in node_details:
+        hostname = node.get("hostname")
+        ip = node.get("ip")
+        if node.get("isNameNode"):
+            namenode_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isResourceManager"):
+            resourcemanager_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isDataNode"):
+            datanodes_lines.append(f"{hostname} ansible_host={ip}")
+            # Assurer la data locality : un DataNode est aussi NodeManager
+            nodemanagers_lines.append(f"{hostname} ansible_host={ip}")
+    
+    if namenode_lines:
+        inventory_lines.append("[namenode]")
+        inventory_lines.extend(namenode_lines)
+    if resourcemanager_lines:
+        inventory_lines.append("[resourcemanager]")
+        inventory_lines.extend(resourcemanager_lines)
+    if datanodes_lines:
+        inventory_lines.append("[datanodes]")
+        inventory_lines.extend(datanodes_lines)
+    if nodemanagers_lines:
+        inventory_lines.append("[nodemanagers]")
+        inventory_lines.extend(nodemanagers_lines)
+    
+    inventory_content = "\n".join(inventory_lines)
+    inventory_path = os.path.join(cluster_folder, "inventory.ini")
+    try:
+        with open(inventory_path, "w") as inv_file:
+            inv_file.write(inventory_content)
+    except Exception as e:
+        return jsonify({"error": "Error writing inventory file", "details": str(e)}), 500
+
+    # 5. Installer Ansible sur le NameNode et configurer SSH sur les autres nœuds
+    # Trouver le NameNode (premier nœud marqué isNameNode)
+    namenode = None
+    for node in node_details:
+        if node.get("isNameNode"):
+            namenode = node
+            break
+    if not namenode:
+        return jsonify({"error": "No NameNode defined"}), 400
+    namenode_hostname = namenode.get("hostname")
+
+    # a. Installer Ansible sur le NameNode (s'il n'est pas déjà installé)
+    try:
+        check_ansible_cmd = f'vagrant ssh {namenode_hostname} -c "which ansible"'
+        result = subprocess.run(check_ansible_cmd, shell=True, cwd=cluster_folder,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        if not result.stdout.strip():
+            install_ansible_cmd = f'vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y ansible"'
+            subprocess.run(install_ansible_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing ansible on NameNode", "details": str(e)}), 500
+
+    # b. Générer une clé SSH sur le NameNode si elle n'existe pas et récupérer la clé publique
+    try:
+        gen_key_cmd = f'vagrant ssh {namenode_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+        subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
+        get_pubkey_cmd = f'vagrant ssh {namenode_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+        result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+        public_key = result_pub.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error generating or retrieving SSH key on NameNode", "details": str(e)}), 500
+
+    # c. Configurer SSH sur les autres nœuds en ajoutant la clé publique dans leur authorized_keys
+    for node in node_details:
+        if node.get("hostname") != namenode_hostname:
+            target_hostname = node.get("hostname")
+            try:
+                copy_key_cmd = f'vagrant ssh {target_hostname} -c "mkdir -p ~/.ssh && echo \'{public_key}\' >> ~/.ssh/authorized_keys"'
+                subprocess.run(copy_key_cmd, shell=True, cwd=cluster_folder, check=True)
+            except subprocess.CalledProcessError as e:
+                return jsonify({"error": f"Error configuring SSH on node {target_hostname}", "details": str(e)}), 500
+
     return jsonify({
-        "message": "Cluster created successfully",
-        "cluster_folder": cluster_folder
+        "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, and SSH configured on other nodes",
+        "cluster_folder": cluster_folder,
+        "inventory_file": inventory_path
     }), 200
 
 
