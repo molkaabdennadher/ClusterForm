@@ -8,6 +8,7 @@ import traceback
 import random
 import shutil
 import platform
+import shlex
 import smtplib
 import tempfile
 from email.message import EmailMessage
@@ -855,7 +856,7 @@ def create_cluster():
         return jsonify({"error": "No NameNode defined"}), 400
     namenode_hostname = namenode.get("hostname")
     namenode_ip = namenode.get("ip")  # pour le copier-coller de Hadoop
-
+    """
     # a. Installer Ansible sur le NameNode (s'il n'est pas déjà installé)
     try:
         check_ansible_cmd = f'vagrant ssh {namenode_hostname} -c "which ansible"'
@@ -866,43 +867,100 @@ def create_cluster():
             subprocess.run(install_ansible_cmd, shell=True, cwd=cluster_folder, check=True)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error installing ansible on NameNode", "details": str(e)}), 500
-
-    # b. Générer une clé SSH sur le NameNode si elle n'existe pas et récupérer la clé publique
+    """
     try:
+        # Générer une clé SSH sur le NameNode si elle n'existe pas et récupérer la clé publique
         gen_key_cmd = f'vagrant ssh {namenode_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
         subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
         get_pubkey_cmd = f'vagrant ssh {namenode_hostname} -c "cat ~/.ssh/id_rsa.pub"'
         result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
-        public_key = result_pub.stdout.strip()
+        namenode_public_key = result_pub.stdout.strip()
+        print("Public key du NameNode récupérée :", namenode_public_key)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error generating or retrieving SSH key on NameNode", "details": str(e)}), 500
 
-    # c. Configurer SSH sur les autres nœuds en ajoutant la clé publique dans leur authorized_keys
-    for node in node_details:
-        if node.get("hostname") != namenode_hostname:
-            target_hostname = node.get("hostname")
-            try:
-                copy_key_cmd = f'vagrant ssh {target_hostname} -c "mkdir -p ~/.ssh && echo \'{public_key}\' >> ~/.ssh/authorized_keys"'
-                subprocess.run(copy_key_cmd, shell=True, cwd=cluster_folder, check=True)
-            except subprocess.CalledProcessError as e:
-                return jsonify({"error": f"Error configuring SSH on node {target_hostname}", "details": str(e)}), 500
+    # Sécuriser la clé publique
+    safe_namenode_public_key = shlex.quote(namenode_public_key)
 
-    # 6. Installation de Hadoop sur le NameNode, copie de l'installation sur les autres nœuds,
+    for node in node_details:
+        node_hostname = node.get("hostname")
+
+        if node_hostname != namenode_hostname:
+            try:
+                # Générer une clé SSH sur chaque nœud si elle n'existe pas
+                gen_key_cmd = f'vagrant ssh {node_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+                subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                # Récupérer la clé publique de chaque nœud
+                get_pubkey_cmd = f'vagrant ssh {node_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+                result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+                node_public_key = result_pub.stdout.strip()
+                print(f"Public key du nœud {node_hostname} récupérée :", node_public_key)
+
+                # Sécuriser la clé publique du nœud
+                safe_node_public_key = shlex.quote(node_public_key)
+
+                # Ajouter la clé du NameNode à chaque nœud
+                add_namenode_key_cmd = (
+                    f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                    f'echo {safe_namenode_public_key} >> ~/.ssh/authorized_keys && '
+                    f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                )
+                subprocess.run(add_namenode_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                # Ajouter la clé du nœud au NameNode pour permettre la connexion inverse
+                add_node_key_to_namenode_cmd = (
+                    f'vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && '
+                    f'echo {safe_node_public_key} >> ~/.ssh/authorized_keys && '
+                    f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                )
+                subprocess.run(add_node_key_to_namenode_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            except subprocess.CalledProcessError as e:
+                return jsonify({"error": f"Error configuring SSH for node {node_hostname}", "details": str(e)}), 500
+
+    return jsonify({"message": "SSH keys successfully configured bidirectionally."}), 200
+"""
+# 6. Installation de Hadoop sur le NameNode, copie de l'installation sur les autres nœuds,
     try:
-        # Install Hadoop on the NameNode with error handling
+    # Install Hadoop on the NameNode
         hadoop_install_cmd = (
             f'vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y wget && '
             f'wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && '
-            f'test -s /tmp/hadoop.tar.gz && '  # Check file exists and size > 0
+            f'test -s /tmp/hadoop.tar.gz && '
             f'sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && '
             f'sudo mv /opt/hadoop-3.3.1 /opt/hadoop && '
             f'rm /tmp/hadoop.tar.gz"'
         )
         subprocess.run(hadoop_install_cmd, shell=True, cwd=cluster_folder, check=True)
+
+        # Create Hadoop archive (must be inside the same try block)
+        tar_hadoop_cmd = f'vagrant ssh {namenode_hostname} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
+        subprocess.run(tar_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
+
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error installing Hadoop on NameNode", "details": str(e)}), 500
 
+# Copy Hadoop to other nodes (needs its own try block)
+    for node in node_details:
+        if node.get("hostname") != namenode_hostname:
+            target_hostname = node.get("hostname")
+            try:
+                copy_hadoop_cmd = (
+                    f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && '
+                    f'sudo rm -rf /opt/hadoop && '
+                    f'scp -o StrictHostKeyChecking=no {namenode_ip}:/tmp/hadoop.tar.gz /tmp/hadoop.tar.gz && '
+                    f'sudo tar -xzf /tmp/hadoop.tar.gz -C /opt && sudo rm /tmp/hadoop.tar.gz"'
+                )
+                subprocess.run(copy_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
+            except subprocess.CalledProcessError as e:
+                return jsonify({
+                    "error": f"Error copying Hadoop to node {target_hostname}",
+                    "details": str(e)
+                }), 500
 
 
 # Installer Java et net-tools et configurer les variables d'environnement sur tous les nœuds
@@ -928,13 +986,6 @@ def create_cluster():
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path
     }), 200
-
-    return jsonify({
-        "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, SSH configured, "
-                   "Hadoop installed and copied, Java and net-tools installed and environment variables configured",
-        "cluster_folder": cluster_folder,
-        "inventory_file": inventory_path
-    }), 200
-    
+"""  
 if __name__ == '__main__':
     app.run(debug=True)

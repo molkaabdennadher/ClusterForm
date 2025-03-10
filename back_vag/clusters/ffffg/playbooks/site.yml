@@ -1,7 +1,0 @@
----
-- import_playbook: common.yml
-- import_playbook: hadoop_env.yml
-- import_playbook: hadoop_install.yml
-- import_playbook: distribute_hadoop.yml
-- import_playbook: hadoop_config.yml
-- import_playbook: start_services.yml
