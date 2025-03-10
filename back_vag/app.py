@@ -856,7 +856,7 @@ def create_cluster():
         return jsonify({"error": "No NameNode defined"}), 400
     namenode_hostname = namenode.get("hostname")
     namenode_ip = namenode.get("ip")  # pour le copier-coller de Hadoop
-    """
+    
     # a. Installer Ansible sur le NameNode (s'il n'est pas déjà installé)
     try:
         check_ansible_cmd = f'vagrant ssh {namenode_hostname} -c "which ansible"'
@@ -867,7 +867,7 @@ def create_cluster():
             subprocess.run(install_ansible_cmd, shell=True, cwd=cluster_folder, check=True)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error installing ansible on NameNode", "details": str(e)}), 500
-    """
+    # b. configuration de sssssssssh
     try:
         # Générer une clé SSH sur le NameNode si elle n'existe pas et récupérer la clé publique
         gen_key_cmd = f'vagrant ssh {namenode_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
@@ -922,8 +922,6 @@ def create_cluster():
             except subprocess.CalledProcessError as e:
                 return jsonify({"error": f"Error configuring SSH for node {node_hostname}", "details": str(e)}), 500
 
-    return jsonify({"message": "SSH keys successfully configured bidirectionally."}), 200
-"""
 # 6. Installation de Hadoop sur le NameNode, copie de l'installation sur les autres nœuds,
     try:
     # Install Hadoop on the NameNode
@@ -986,6 +984,6 @@ def create_cluster():
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path
     }), 200
-"""  
+
 if __name__ == '__main__':
     app.run(debug=True)
