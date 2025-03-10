@@ -889,8 +889,23 @@ def create_cluster():
                 return jsonify({"error": f"Error configuring SSH on node {target_hostname}", "details": str(e)}), 500
 
     # 6. Installation de Hadoop sur le NameNode, copie de l'installation sur les autres nœuds,
-   
-    # Installer Java et net-tools et configurer les variables d'environnement sur tous les nœuds
+    try:
+        # Install Hadoop on the NameNode with error handling
+        hadoop_install_cmd = (
+            f'vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y wget && '
+            f'wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && '
+            f'test -s /tmp/hadoop.tar.gz && '  # Check file exists and size > 0
+            f'sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && '
+            f'sudo mv /opt/hadoop-3.3.1 /opt/hadoop && '
+            f'rm /tmp/hadoop.tar.gz"'
+        )
+        subprocess.run(hadoop_install_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing Hadoop on NameNode", "details": str(e)}), 500
+
+
+
+# Installer Java et net-tools et configurer les variables d'environnement sur tous les nœuds
     for node in node_details:
         target_hostname = node.get("hostname")
         try:
@@ -900,12 +915,19 @@ def create_cluster():
             subprocess.run(install_java_net_cmd, shell=True, cwd=cluster_folder, check=True)
             configure_env_cmd = (
                 f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
-                #f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
+                f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
                 f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
             )
             subprocess.run(configure_env_cmd, shell=True, cwd=cluster_folder, check=True)
         except subprocess.CalledProcessError as e:
             return jsonify({"error": f"Error installing Java/net or configuring environment on node {target_hostname}", "details": str(e)}), 500
+
+    return jsonify({
+        "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, SSH configured, "
+                   "Hadoop installed and copied, Java and net-tools installed and environment variables configured",
+        "cluster_folder": cluster_folder,
+        "inventory_file": inventory_path
+    }), 200
 
     return jsonify({
         "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, SSH configured, "
