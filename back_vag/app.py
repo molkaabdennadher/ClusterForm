@@ -824,27 +824,30 @@ def create_cluster():
             # Assurer la data locality : un DataNode est aussi NodeManager
             nodemanagers_lines.append(f"{hostname} ansible_host={ip}")
     
-    if namenode_lines:
-        inventory_lines.append("[namenode]")
-        inventory_lines.extend(namenode_lines)
-    if resourcemanager_lines:
-        inventory_lines.append("[resourcemanager]")
-        inventory_lines.extend(resourcemanager_lines)
-    if datanodes_lines:
-        inventory_lines.append("[datanodes]")
-        inventory_lines.extend(datanodes_lines)
-    if nodemanagers_lines:
-        inventory_lines.append("[nodemanagers]")
-        inventory_lines.extend(nodemanagers_lines)
-    
-    inventory_content = "\n".join(inventory_lines)
-    inventory_path = os.path.join(cluster_folder, "inventory.ini")
-    try:
-        with open(inventory_path, "w") as inv_file:
-            inv_file.write(inventory_content)
-    except Exception as e:
-        return jsonify({"error": "Error writing inventory file", "details": str(e)}), 500
+        if namenode_lines:
+            inventory_lines.append("[namenode]")
+            inventory_lines.extend(namenode_lines)
+        if resourcemanager_lines:
+            inventory_lines.append("[resourcemanager]")
+            inventory_lines.extend(resourcemanager_lines)
+        if datanodes_lines:
+            inventory_lines.append("[datanodes]")
+            inventory_lines.extend(datanodes_lines)
+        if nodemanagers_lines:
+            inventory_lines.append("[nodemanagers]")
+            inventory_lines.extend(nodemanagers_lines)
+        
+        inventory_content = "\n".join(inventory_lines)
+        # Ajout de variables globales pour définir l'utilisateur SSH et l'interpréteur Python
+        global_vars = "[all:vars]\nansible_user=vagrant\nansible_python_interpreter=/usr/bin/python3\nansible_ssh_common_args='-o StrictHostKeyChecking=no'\n\n"
+        inventory_content = global_vars + inventory_content
 
+        inventory_path = os.path.join(cluster_folder, "inventory.ini")
+        try:
+            with open(inventory_path, "w", encoding="utf-8") as inv_file:
+                inv_file.write(inventory_content)
+        except Exception as e:
+            return jsonify({"error": "Error writing inventory file", "details": str(e)}), 500
     # 5. Installer Ansible sur le NameNode et configurer SSH sur les autres nœuds
     # Trouver le NameNode (premier nœud marqué isNameNode)
     namenode = None
@@ -868,6 +871,7 @@ def create_cluster():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error installing ansible on NameNode", "details": str(e)}), 500
     # b. configuration de sssssssssh
+ # --- Configuration SSH pour le NameNode ---
     try:
         # Générer une clé SSH sur le NameNode si elle n'existe pas et récupérer la clé publique
         gen_key_cmd = f'vagrant ssh {namenode_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
@@ -875,46 +879,63 @@ def create_cluster():
 
         get_pubkey_cmd = f'vagrant ssh {namenode_hostname} -c "cat ~/.ssh/id_rsa.pub"'
         result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      universal_newlines=True, check=True)
         namenode_public_key = result_pub.stdout.strip()
         print("Public key du NameNode récupérée :", namenode_public_key)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error generating or retrieving SSH key on NameNode", "details": str(e)}), 500
 
-    # Sécuriser la clé publique
-    safe_namenode_public_key = shlex.quote(namenode_public_key)
+    # Ajouter la clé du NameNode à son propre authorized_keys (pour permettre SSH local)
+    try:
+        add_self_key_cmd = (
+            f'vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && '
+            f'grep -q \'{namenode_public_key}\' ~/.ssh/authorized_keys || echo \'{namenode_public_key}\' >> ~/.ssh/authorized_keys && '
+            f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+        )
+        subprocess.run(add_self_key_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error configuring self SSH key on NameNode", "details": str(e)}), 500
 
+    # --- Configuration SSH pour les autres nœuds ---
     for node in node_details:
         node_hostname = node.get("hostname")
-
         if node_hostname != namenode_hostname:
             try:
-                # Générer une clé SSH sur chaque nœud si elle n'existe pas
+                # Générer une clé SSH sur le nœud s'il n'existe pas
                 gen_key_cmd = f'vagrant ssh {node_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
                 subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
 
-                # Récupérer la clé publique de chaque nœud
+                # Récupérer la clé publique du nœud
                 get_pubkey_cmd = f'vagrant ssh {node_hostname} -c "cat ~/.ssh/id_rsa.pub"'
                 result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            universal_newlines=True, check=True)
                 node_public_key = result_pub.stdout.strip()
                 print(f"Public key du nœud {node_hostname} récupérée :", node_public_key)
 
-                # Sécuriser la clé publique du nœud
                 safe_node_public_key = shlex.quote(node_public_key)
 
-                # Ajouter la clé du NameNode à chaque nœud
+                # Ajouter la clé du nœud dans son propre authorized_keys (pour SSH local)
+                add_self_key_cmd = (
+                    f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                    f'grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && '
+                    f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                )
+                subprocess.run(add_self_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                # Ajouter la clé du NameNode dans l'authorized_keys du nœud (pour que le NameNode puisse s'y connecter)
                 add_namenode_key_cmd = (
                     f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
-                    f'echo {safe_namenode_public_key} >> ~/.ssh/authorized_keys && '
+                    f'grep -q {shlex.quote(namenode_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(namenode_public_key)} >> ~/.ssh/authorized_keys && '
                     f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
                 )
                 subprocess.run(add_namenode_key_cmd, shell=True, cwd=cluster_folder, check=True)
 
-                # Ajouter la clé du nœud au NameNode pour permettre la connexion inverse
+                # Ajouter la clé du nœud dans l'authorized_keys du NameNode (pour la connexion inverse)
                 add_node_key_to_namenode_cmd = (
                     f'vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && '
-                    f'echo {safe_node_public_key} >> ~/.ssh/authorized_keys && '
+                    f'grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && '
                     f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
                 )
                 subprocess.run(add_node_key_to_namenode_cmd, shell=True, cwd=cluster_folder, check=True)
@@ -963,24 +984,195 @@ def create_cluster():
 
 # Installer Java et net-tools et configurer les variables d'environnement sur tous les nœuds
     for node in node_details:
-        target_hostname = node.get("hostname")
-        try:
-            install_java_net_cmd = (
-                f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools"'
-            )
-            subprocess.run(install_java_net_cmd, shell=True, cwd=cluster_folder, check=True)
-            configure_env_cmd = (
-                f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
-                f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
-                f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
-            )
-            subprocess.run(configure_env_cmd, shell=True, cwd=cluster_folder, check=True)
-        except subprocess.CalledProcessError as e:
-            return jsonify({"error": f"Error installing Java/net or configuring environment on node {target_hostname}", "details": str(e)}), 500
+            target_hostname = node.get("hostname")
+            try:
+                install_java_net_cmd = (
+                    f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
+                )
+                subprocess.run(install_java_net_cmd, shell=True, cwd=cluster_folder, check=True)
+                configure_env_cmd = (
+                    f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
+                    f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
+                    f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
+                )
+                subprocess.run(configure_env_cmd, shell=True, cwd=cluster_folder, check=True)
+            except subprocess.CalledProcessError as e:
+                return jsonify({"error": f"Error installing Java/net/python or configuring environment on node {target_hostname}", "details": str(e)}), 500
+
+  # 7. Création des playbooks Ansible et des templates Jinja2 pour la configuration Hadoop
+
+    # Créer le dossier "templates" pour stocker les fichiers de configuration Jinja2
+    templates_dir = os.path.join(cluster_folder, "templates")
+    os.makedirs(templates_dir, exist_ok=True)
+
+    # Template pour core-site.xml
+    core_site_template = """<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://{{ namenode_hostname }}:9000</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "core-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(core_site_template)
+
+    # Template pour hdfs-site.xml (ajout du port 9870 pour l'interface Web)
+    hdfs_site_template = """<configuration>
+  <property>
+    <name>dfs.replication</name>
+    <value>2</value>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address</name>
+    <value>{{ namenode_hostname }}:9870</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "hdfs-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(hdfs_site_template)
+
+    # Template pour yarn-site.xml
+    yarn_site_template = """<configuration>
+  <property>
+    <name>yarn.resourcemanager.hostname</name>
+    <value>{{ namenode_hostname }}</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "yarn-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(yarn_site_template)
+
+    # Template pour mapred-site.xml
+    mapred_site_template = """<configuration>
+  <property>
+    <name>mapreduce.framework.name</name>
+    <value>yarn</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "mapred-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(mapred_site_template)
+
+    # Template pour le fichier masters (contenant le nom du NameNode)
+    masters_template = """{{ groups['namenode'][0] }}
+"""
+    with open(os.path.join(templates_dir, "masters.j2"), "w", encoding="utf-8") as f:
+        f.write(masters_template)
+
+    # Template pour le fichier workers (contenant la liste des DataNodes)
+    workers_template = """{% for worker in groups['datanodes'] %}
+{{ worker }}
+{% endfor %}
+"""
+    with open(os.path.join(templates_dir, "workers.j2"), "w", encoding="utf-8") as f:
+        f.write(workers_template)
+
+    # Template pour mettre à jour /etc/hosts avec tous les nœuds du cluster
+    hosts_template = """# ANSIBLE GENERATED CLUSTER HOSTS
+{% for host in groups['all'] %}
+{{ hostvars[host]['ansible_host'] }} {{ host }}
+{% endfor %}
+"""
+    with open(os.path.join(templates_dir, "hosts.j2"), "w", encoding="utf-8") as f:
+        f.write(hosts_template)
+
+    # Création du playbook Ansible pour configurer les fichiers de Hadoop
+    hadoop_config_playbook = """---
+- name: Configurer les fichiers de configuration Hadoop et /etc/hosts
+  hosts: all
+  become: yes
+  vars:
+    namenode_hostname: "{{ groups['namenode'][0] }}"
+  tasks:
+    - name: Déployer core-site.xml
+      template:
+        src: templates/core-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/core-site.xml
+
+    - name: Déployer hdfs-site.xml
+      template:
+        src: templates/hdfs-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/hdfs-site.xml
+
+    - name: Déployer yarn-site.xml
+      template:
+        src: templates/yarn-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/yarn-site.xml
+
+    - name: Déployer mapred-site.xml
+      template:
+        src: templates/mapred-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/mapred-site.xml
+
+    - name: Déployer le fichier masters
+      template:
+        src: templates/masters.j2
+        dest: /opt/hadoop/etc/hadoop/masters
+
+    - name: Déployer le fichier workers
+      template:
+        src: templates/workers.j2
+        dest: /opt/hadoop/etc/hadoop/workers
+
+    - name: Mettre à jour le fichier /etc/hosts avec les hôtes du cluster
+      template:
+        src: templates/hosts.j2
+        dest: /etc/hosts
+"""
+    hadoop_config_playbook_path = os.path.join(cluster_folder, "hadoop_config.yml")
+    with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
+        f.write(hadoop_config_playbook)
+
+    # Création du playbook Ansible pour démarrer les services Hadoop
+    hadoop_start_playbook = """---
+- name: Démarrer les services Hadoop
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Formater le NameNode (si nécessaire)
+      command: /opt/hadoop/bin/hdfs namenode -format -force
+      args:
+        creates: /opt/hadoop/hdfs/name/current/VERSION
+
+    - name: Démarrer HDFS
+      command: /opt/hadoop/sbin/start-dfs.sh
+
+    - name: Démarrer YARN
+      command: /opt/hadoop/sbin/start-yarn.sh
+"""
+    hadoop_start_playbook_path = os.path.join(cluster_folder, "hadoop_start_services.yml")
+    with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
+        f.write(hadoop_start_playbook)
+
+    # Définir un préfixe pour la commande ansible-playbook en fonction de l'OS
+    ansible_cmd_prefix = ""
+    if platform.system() == "Windows":
+        # Si vous utilisez WSL, préfixez la commande par "wsl "
+        ansible_cmd_prefix = "wsl "
+    # 8. Exécuter le playbook de configuration Hadoop sur le NameNode
+    try:
+        # On suppose que le dossier cluster_folder est synchronisé sur le NameNode dans /vagrant
+        # On utilise os.path.basename(inventory_path) pour référencer le fichier dans le répertoire partagé.
+        inventory_file_in_vm = os.path.basename(inventory_path)
+        config_playbook_cmd = (
+            f'vagrant ssh {namenode_hostname} -c "cd /vagrant && ansible-playbook -i {inventory_file_in_vm} hadoop_config.yml"'
+        )
+        subprocess.run(config_playbook_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error configuring Hadoop configuration files", "details": str(e)}), 500
+
+    # 9. Exécuter le playbook pour démarrer les services Hadoop sur le NameNode
+    try:
+        start_playbook_cmd = (
+            f'vagrant ssh {namenode_hostname} -c "cd /vagrant && ansible-playbook -i {inventory_file_in_vm} hadoop_start_services.yml"'
+        )
+        subprocess.run(start_playbook_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error starting Hadoop services", "details": str(e)}), 500
 
     return jsonify({
         "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, SSH configured, "
-                   "Hadoop installed and copied, Java and net-tools installed and environment variables configured",
+                   "Hadoop installed and copied, Java and net-tools installed, Hadoop configuration applied and services started",
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path
     }), 200
