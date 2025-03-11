@@ -1,4 +1,5 @@
 
+import time
 from flask import Flask, request, jsonify, render_template
 import subprocess
 import os
@@ -1129,16 +1130,30 @@ def create_cluster():
   hosts: namenode
   become: yes
   tasks:
+    - name: Créer le répertoire /opt/hadoop/logs si nécessaire
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
     - name: Formater le NameNode (si nécessaire)
       command: /opt/hadoop/bin/hdfs namenode -format -force
       args:
         creates: /opt/hadoop/hdfs/name/current/VERSION
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
 
     - name: Démarrer HDFS
       command: /opt/hadoop/sbin/start-dfs.sh
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
 
     - name: Démarrer YARN
       command: /opt/hadoop/sbin/start-yarn.sh
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
 """
     hadoop_start_playbook_path = os.path.join(cluster_folder, "hadoop_start_services.yml")
     with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
@@ -1149,9 +1164,10 @@ def create_cluster():
     if platform.system() == "Windows":
         # Si vous utilisez WSL, préfixez la commande par "wsl "
         ansible_cmd_prefix = "wsl "
+
     # 8. Exécuter le playbook de configuration Hadoop sur le NameNode
     try:
-        # On suppose que le dossier cluster_folder est synchronisé sur le NameNode dans /vagrant
+        # On suppose que le dossier cluster_folder est synchronisé sur le NameNode dans /vagrant.
         # On utilise os.path.basename(inventory_path) pour référencer le fichier dans le répertoire partagé.
         inventory_file_in_vm = os.path.basename(inventory_path)
         config_playbook_cmd = (
@@ -1172,10 +1188,11 @@ def create_cluster():
 
     return jsonify({
         "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, SSH configured, "
-                   "Hadoop installed and copied, Java and net-tools installed, Hadoop configuration applied and services started",
+                   "Hadoop installed and copied, Java/net/python installed, Hadoop configuration applied and services started",
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path
     }), 200
+
 
 if __name__ == '__main__':
     app.run(debug=True)
