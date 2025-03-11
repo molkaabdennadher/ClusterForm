@@ -1124,12 +1124,22 @@ def create_cluster():
     with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
         f.write(hadoop_config_playbook)
 
-    # Création du playbook Ansible pour démarrer les services Hadoop
+     # Création du playbook Ansible pour démarrer les services Hadoop
     hadoop_start_playbook = """---
 - name: Démarrer les services Hadoop
   hosts: namenode
   become: yes
   tasks:
+    - name: Mettre à jour hadoop-env.sh pour définir JAVA_HOME
+      shell: |
+        if grep -q '^export JAVA_HOME=' /opt/hadoop/etc/hadoop/hadoop-env.sh; then
+          sed -i 's|^export JAVA_HOME=.*|export JAVA_HOME=/usr/lib/jvm/default-java|' /opt/hadoop/etc/hadoop/hadoop-env.sh;
+        else
+          echo 'export JAVA_HOME=/usr/lib/jvm/default-java' >> /opt/hadoop/etc/hadoop/hadoop-env.sh;
+        fi
+      args:
+        executable: /bin/bash
+
     - name: Créer le répertoire /opt/hadoop/logs si nécessaire
       file:
         path: /opt/hadoop/logs
@@ -1139,21 +1149,30 @@ def create_cluster():
         mode: '0755'
 
     - name: Formater le NameNode (si nécessaire)
-      command: /opt/hadoop/bin/hdfs namenode -format -force
+      shell: "/opt/hadoop/bin/hdfs namenode -format -force"
       args:
         creates: /opt/hadoop/hdfs/name/current/VERSION
+      become_user: vagrant
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
+      executable: /bin/bash
 
     - name: Démarrer HDFS
-      command: /opt/hadoop/sbin/start-dfs.sh
+      shell: "/opt/hadoop/sbin/start-dfs.sh"
+      become_user: vagrant
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
+        HDFS_NAMENODE_USER: vagrant
+        HDFS_DATANODE_USER: vagrant
+        HDFS_SECONDARYNAMENODE_USER: vagrant
+      executable: /bin/bash
 
     - name: Démarrer YARN
-      command: /opt/hadoop/sbin/start-yarn.sh
+      shell: "/opt/hadoop/sbin/start-yarn.sh"
+      become_user: vagrant
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
+      executable: /bin/bash
 """
     hadoop_start_playbook_path = os.path.join(cluster_folder, "hadoop_start_services.yml")
     with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
@@ -1162,13 +1181,10 @@ def create_cluster():
     # Définir un préfixe pour la commande ansible-playbook en fonction de l'OS
     ansible_cmd_prefix = ""
     if platform.system() == "Windows":
-        # Si vous utilisez WSL, préfixez la commande par "wsl "
         ansible_cmd_prefix = "wsl "
 
     # 8. Exécuter le playbook de configuration Hadoop sur le NameNode
     try:
-        # On suppose que le dossier cluster_folder est synchronisé sur le NameNode dans /vagrant.
-        # On utilise os.path.basename(inventory_path) pour référencer le fichier dans le répertoire partagé.
         inventory_file_in_vm = os.path.basename(inventory_path)
         config_playbook_cmd = (
             f'vagrant ssh {namenode_hostname} -c "cd /vagrant && ansible-playbook -i {inventory_file_in_vm} hadoop_config.yml"'
@@ -1187,11 +1203,12 @@ def create_cluster():
         return jsonify({"error": "Error starting Hadoop services", "details": str(e)}), 500
 
     return jsonify({
-        "message": "Cluster created successfully, inventory generated, ansible installed on NameNode, SSH configured, "
+        "message": "Cluster created successfully, inventory generated, Ansible installed on NameNode, SSH configured, "
                    "Hadoop installed and copied, Java/net/python installed, Hadoop configuration applied and services started",
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path
     }), 200
+
 
 
 if __name__ == '__main__':

@@ -11,7 +11,7 @@ const ClusterVir = () => {
     Classic: true,
   });
   // Nouveaux champs pour la configuration réseau
-  const [gateway, setGateway] = useState("192.168.0.1");
+  const [gateway, setGateway] = useState("192.168.56.1");
   const [nameservers, setNameservers] = useState("8.8.8.8,8.8.4.4");
 
   const navigate = useNavigate();

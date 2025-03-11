@@ -1,0 +1,32 @@
+---
+- name: Démarrer les services Hadoop
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Créer le répertoire /opt/hadoop/logs si nécessaire
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
+    - name: Formater le NameNode (si nécessaire)
+      command: /opt/hadoop/bin/hdfs namenode -format -force
+      args:
+        creates: /opt/hadoop/hdfs/name/current/VERSION
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+
+    - name: Démarrer HDFS
+      command: /opt/hadoop/sbin/start-dfs.sh
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+        HDFS_NAMENODE_USER: vagrant
+        HDFS_DATANODE_USER: vagrant
+        HDFS_SECONDARYNAMENODE_USER: vagrant
+
+    - name: Démarrer YARN
+      command: /opt/hadoop/sbin/start-yarn.sh
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
