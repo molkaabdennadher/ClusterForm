@@ -944,27 +944,39 @@ def create_cluster():
             except subprocess.CalledProcessError as e:
                 return jsonify({"error": f"Error configuring SSH for node {node_hostname}", "details": str(e)}), 500
 
-# 6. Installation de Hadoop sur le NameNode, copie de l'installation sur les autres nœuds,
+    # 6. Installation de Hadoop sur le NameNode (si nécessaire) et mise à jour de l'archive dans le dossier partagé
     try:
-    # Install Hadoop on the NameNode
-        hadoop_install_cmd = (
-            f'vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y wget && '
-            f'wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && '
-            f'test -s /tmp/hadoop.tar.gz && '
-            f'sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && '
-            f'sudo mv /opt/hadoop-3.3.1 /opt/hadoop && '
-            f'rm /tmp/hadoop.tar.gz"'
-        )
-        subprocess.run(hadoop_install_cmd, shell=True, cwd=cluster_folder, check=True)
+        # Vérifier directement sur la VM si l'archive Hadoop existe déjà dans le dossier partagé (/vagrant)
+        check_archive_cmd = f'vagrant ssh {namenode_hostname} -c "test -f /vagrant/hadoop.tar.gz"'
+        result = subprocess.run(check_archive_cmd, shell=True, cwd=cluster_folder)
+        if result.returncode != 0:
+            # L'archive n'existe pas dans /vagrant : on installe Hadoop sur le NameNode
+            hadoop_install_cmd = (
+                f'vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y wget && '
+                f'wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && '
+                f'test -s /tmp/hadoop.tar.gz && '
+                f'sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && '
+                f'sudo mv /opt/hadoop-3.3.1 /opt/hadoop && '
+                f'rm /tmp/hadoop.tar.gz"'
+            )
+            subprocess.run(hadoop_install_cmd, shell=True, cwd=cluster_folder, check=True)
 
-        # Create Hadoop archive (must be inside the same try block)
-        tar_hadoop_cmd = f'vagrant ssh {namenode_hostname} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
-        subprocess.run(tar_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
+            # Créer l'archive Hadoop sur le NameNode
+            tar_hadoop_cmd = f'vagrant ssh {namenode_hostname} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
+            subprocess.run(tar_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
 
+            # Copier l'archive dans le dossier partagé (/vagrant)
+            copy_to_shared_cmd = f'vagrant ssh {namenode_hostname} -c "sudo cp /tmp/hadoop.tar.gz /vagrant/hadoop.tar.gz"'
+            subprocess.run(copy_to_shared_cmd, shell=True, cwd=cluster_folder, check=True)
+        else:
+            print("L'archive Hadoop existe déjà dans /vagrant/hadoop.tar.gz, on l'utilise pour mettre à jour le NameNode.")
+            # Même si l'archive existe, on extrait sur le NameNode pour mettre à jour /opt/hadoop
+            extract_cmd = f'vagrant ssh {namenode_hostname} -c "sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+            subprocess.run(extract_cmd, shell=True, cwd=cluster_folder, check=True)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error installing Hadoop on NameNode", "details": str(e)}), 500
 
-# Copy Hadoop to other nodes (needs its own try block)
+    # 7. Copier l'archive Hadoop vers les autres nœuds depuis le dossier partagé
     for node in node_details:
         if node.get("hostname") != namenode_hostname:
             target_hostname = node.get("hostname")
@@ -972,8 +984,7 @@ def create_cluster():
                 copy_hadoop_cmd = (
                     f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && '
                     f'sudo rm -rf /opt/hadoop && '
-                    f'scp -o StrictHostKeyChecking=no {namenode_ip}:/tmp/hadoop.tar.gz /tmp/hadoop.tar.gz && '
-                    f'sudo tar -xzf /tmp/hadoop.tar.gz -C /opt && sudo rm /tmp/hadoop.tar.gz"'
+                    f'sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
                 )
                 subprocess.run(copy_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
             except subprocess.CalledProcessError as e:
@@ -981,7 +992,6 @@ def create_cluster():
                     "error": f"Error copying Hadoop to node {target_hostname}",
                     "details": str(e)
                 }), 500
-
 
 # Installer Java et net-tools et configurer les variables d'environnement sur tous les nœuds
     for node in node_details:
@@ -1120,11 +1130,17 @@ def create_cluster():
         src: templates/hosts.j2
         dest: /etc/hosts
 """
+
+
     hadoop_config_playbook_path = os.path.join(cluster_folder, "hadoop_config.yml")
     with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
         f.write(hadoop_config_playbook)
 
      # Création du playbook Ansible pour démarrer les services Hadoop
+     # Création du playbook Ansible pour démarrer les services Hadoop
+   
+   
+    # Création du playbook Ansible pour démarrer les services Hadoop
     hadoop_start_playbook = """---
 - name: Démarrer les services Hadoop
   hosts: namenode
@@ -1173,6 +1189,27 @@ def create_cluster():
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
       executable: /bin/bash
+
+    - name: Démarrer explicitement le ResourceManager en arrière-plan
+      shell: "nohup /opt/hadoop/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+      executable: /bin/bash
+
+    - name: Pause de 10 secondes pour permettre au ResourceManager de démarrer
+      pause:
+        seconds: 10
+
+    - name: Vérifier le démarrage des services Hadoop (jps)
+      shell: "jps"
+      register: jps_output
+      become_user: vagrant
+      executable: /bin/bash
+
+    - name: Afficher les processus Hadoop
+      debug:
+        var: jps_output.stdout
 """
     hadoop_start_playbook_path = os.path.join(cluster_folder, "hadoop_start_services.yml")
     with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
