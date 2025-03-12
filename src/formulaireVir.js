@@ -1,11 +1,16 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-
+import OSVersionSelect from './OSVersionSelect'; // Assurez-vous d'importer le composant
+import CustomBox from './CustomBox'; 
 export default function FormulaireVir() {
   const [hostname, setHostname] = useState("");
-  const [box, setBox] = useState("ubuntu/trusty64");
+  const [osVersion, setOsVersion] = useState("ubuntu/trusty64");
   const [ram, setRam] = useState(2);
-  const [totalMemoryGB, setMaxRam] = useState(16);
+  const [customBoxes, setCustomBoxes] = useState(() => {
+    // Récupérer les boxes personnalisées depuis localStorage
+    const savedBoxes = localStorage.getItem("customBoxes");
+    return savedBoxes ? JSON.parse(savedBoxes) : []; // Si aucune box n'est trouvée, retourner un tableau vide
+  });  const [totalMemoryGB, setMaxRam] = useState(16);
   const [cpu, setCpu] = useState(1);
   const [maxCpu, setMaxCpu] = useState(8);
   const [network, setNetwork] = useState("NAT");
@@ -15,10 +20,19 @@ export default function FormulaireVir() {
 
   const navigate = useNavigate();
   const location = useLocation();
+  const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
+  const [customRam, setCustomRam] = useState(4);
+  const [customCpu, setCustomCpu] = useState(2);
+  const [osOptions, setOsOptions] = useState(() => {
+    const savedOptions = localStorage.getItem("osOptions");
+    return savedOptions ? JSON.parse(savedOptions) : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
+  });
+  
   const remoteConfig = location.state || {};
   const isRemote = remoteConfig.mode === "distant";
 
   useEffect(() => {
+    
     if (!isRemote) {
       fetch("http://localhost:5000/get-cpu-info")
         .then((res) => res.json())
@@ -53,6 +67,42 @@ export default function FormulaireVir() {
         ); }
       
   }, [isRemote]);
+  
+  useEffect(() => {
+    const handleStorageChange = (e) => {
+      if (e.key === "osOptions") {
+        setOsOptions(JSON.parse(e.newValue));
+      }
+    };
+  
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
+  
+  const handleNodeDetailsChange = (field, value) => {
+    if (field === "osVersion") {
+      setOsVersion(value);
+      if (value === "Box-perso") {
+        setIsCustomBoxOpen(true);
+      } else {
+        setIsCustomBoxOpen(false);
+      }
+    }
+  };
+  const handleAddCustomBox = ({ name, ram, cpu }) => {
+    const updatedBoxes = [...customBoxes, { name, ram, cpu }];
+    const updatedOptions = [...osOptions, name];
+  
+    setCustomBoxes(updatedBoxes);
+    setOsOptions(updatedOptions);
+  
+    // Mettre à jour localStorage
+    localStorage.setItem("customBoxes", JSON.stringify(updatedBoxes));
+    localStorage.setItem("osOptions", JSON.stringify(updatedOptions));
+  };
+  
+  
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -64,10 +114,11 @@ export default function FormulaireVir() {
 
     const requestData = {
       vm_name: hostname,
-      box: box,
       ram: ram,
       cpu: cpu,
-      network: network
+      network: network,
+      customBoxes: customBoxes,
+    
     };
 
     if (isRemote) {
@@ -88,6 +139,7 @@ export default function FormulaireVir() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestData),
       });
+      
       const data = await response.json();
 
       if (response.ok) {
@@ -97,7 +149,6 @@ export default function FormulaireVir() {
 
         const newMachine = {
           hostname: hostname,
-          box: box,
           network: network,
           ram: `${ram} GB`,
           cpu: `${cpu} vCPUs`,
@@ -146,20 +197,22 @@ export default function FormulaireVir() {
             required
           />
 
-          <label className="block text-sm font-medium">Box:</label>
-          <select
-            value={box}
-            onChange={(e) => setBox(e.target.value)}
-            className="w-full p-2 border rounded mb-4"
-          >
-            <option>ubuntu/trusty64</option>
-            <option>laravel/homestead</option>
-            <option>hashicorp/precise64</option>
-            <option>centos/7</option>
-            <option>debian/jessie64</option>
-            <option>hashicorp/precise32</option>
-            <option>scotch/box</option>
-          </select>
+<OSVersionSelect
+        value={osVersion}
+        onChange={(value) => handleNodeDetailsChange("osVersion", value)}
+        onCustomBoxSelect={setIsCustomBoxOpen}
+        options={osOptions}
+      />
+      {isCustomBoxOpen && (
+        <CustomBox
+          ram={customRam}
+          cpu={customCpu}
+          onRamChange={setCustomRam}
+          onCpuChange={setCustomCpu}
+          onClose={() => setIsCustomBoxOpen(false)}
+          onAddBox={handleAddCustomBox}
+        />
+      )}
 
           <label className="block text-sm font-medium">RAM: {ram} GB</label>
           <input

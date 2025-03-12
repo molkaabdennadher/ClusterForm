@@ -1,16 +1,19 @@
 ---
-- name: Configure VM
+- name: Installer et configurer QEMU Guest Agent
   hosts: all
   become: true
   tasks:
-    - name: Update package list
+    - name: Mettre à jour les paquets
       apt:
         update_cache: yes
 
-    - name: Install essential packages
+    - name: Installer qemu-guest-agent
       apt:
-        name: 
-          - net-tools
-          - curl
-          - git
+        name: qemu-guest-agent
         state: present
+
+    - name: Activer le service qemu-guest-agent
+      systemd:
+        name: qemu-guest-agent
+        enabled: yes
+        state: started

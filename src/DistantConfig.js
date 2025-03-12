@@ -7,12 +7,25 @@ const DistantConfig = () => {
   const [vmIp, setVmIp] = useState('');
   const [user, setUser] = useState('root'); // Champ utilisateur prédéfini sur 'root'
   const [password, setPassword] = useState('');
-  const [vmId, setVmId] = useState(''); // Ajout de l'état pour VM ID
+  const [vm_id, setVmId] = useState(''); // Ajout de l'état pour VM ID
   const navigate = useNavigate();
 
   const handleSubmit = () => {
-    // Logique pour envoyer les données ou naviguer vers le formulaire
-    navigate('/formulaire', { state: { proxmoxIp, nodeName, vmIp, user, password, vmId } });
+    // Crée un objet avec les données
+    const vmData = {
+      proxmoxIp,
+      nodeName,
+      vmIp,
+      user,
+      password,
+      vm_id
+    };
+
+    // Sauvegarde les données dans localStorage
+    localStorage.setItem('vmData', JSON.stringify(vmData));
+
+    // Navigue vers le formulaire avec les données sauvegardées
+    navigate('/formulaire', { state: vmData });
   };
 
   return (
@@ -77,12 +90,13 @@ const DistantConfig = () => {
           required
         />
 
-        <label className="block text-sm font-medium">VM ID:</label>
+      <label className="block text-sm font-medium">VM ID:</label>
         <input
-          type="text"
+          type="number" // Utiliser type="number" pour les champs numériques
+          name="vm_id"
           placeholder="Enter VM ID"
-          value={vmId}
-          onChange={(e) => setVmId(e.target.value)}
+          value={vm_id}
+          onChange={(e) => setVmId(e.target.value)} // Ne pas convertir en Number, gérer la conversion plus tard
           className="w-full p-2 border rounded mb-4"
           required
         />

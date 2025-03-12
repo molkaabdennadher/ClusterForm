@@ -10,7 +10,7 @@ variable "network_ip" {
   description = "Adresse IP de la VM"
   type        = string
 }
-variable "proxmox_password" {
+variable "password" {
   description = "Mot de passe de l'utilisateur Proxmox"
   type        = string
   sensitive   = true

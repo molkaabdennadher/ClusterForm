@@ -1,15 +1,51 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react'; 
 import { useLocation, useNavigate } from 'react-router-dom';
 
 const Formulaire = () => {
-  const location = useLocation();
-  const { proxmoxIp, nodeName, user, password } = location.state || {};
+  const { state } = useLocation();  // Récupère les données envoyées par DistantConfig
+  const [formData, setFormData] = useState(state || JSON.parse(localStorage.getItem('vmData')));  // Utilise les données d'état ou localStorage
+// États pour les limites RAM/CPU
+const [maxRam, setMaxRam] = useState(0);
+const [maxCpu, setMaxCpu] = useState(0);
+useEffect(() => {
+  const fetchLimits = async () => {
+    try {
+      const response = await fetch('http://localhost:5000/get_limits');
+      const data = await response.json();
+
+      if (data.max_ram && data.max_cpu) {
+        setMaxRam(data.max_ram);
+        setMaxCpu(data.max_cpu);
+      } else {
+        console.error('Erreur lors de la récupération des limites :', data.error);
+      }
+    } catch (error) {
+      console.error('Erreur de connexion à l\'API :', error);
+    }
+  };
+
+  fetchLimits();
+}, []);
+
+// Enregistrer les données du formulaire dans localStorage
+useEffect(() => {
+  localStorage.setItem('vmData', JSON.stringify(formData));
+}, [formData]);
 
   const [hostname, setHostname] = useState('');
   const [ram, setRam] = useState(2048); // Valeur par défaut
   const [cpu, setCpu] = useState(1); // Valeur par défaut
   const [network, setNetwork] = useState('nat'); // Valeur par défaut
   const [template, setTemplate] = useState('ubuntu'); // Valeur par défaut
+
+
+  const [proxmoxIp, setProxmoxIp] = useState(formData?.proxmoxIp || '');  // Déclare proxmoxIp
+  const [nodeName, setNodeName] = useState(formData?.nodeName || '');  // Déclare nodeName
+  const [password, setPassword] = useState(formData?.password || '');  // Déclare password
+  const [vm_id, setVmId] = useState(formData?.vm_id || '');  // Déclare vm_id
+  const [vmIp, setVmIp] = useState(formData?.vmIp || '');  // Déclare vm_ip
+
+
 
   const navigate = useNavigate();
 
@@ -21,6 +57,11 @@ const Formulaire = () => {
       cpu,
       network,
       template,
+      proxmoxIp,        
+      password,  
+      nodeName, 
+      vm_id,
+      vmIp,
       status: 'Creating...', // Statut temporaire
     };
 
@@ -33,19 +74,20 @@ const Formulaire = () => {
     navigate('/dashboard');
 
     try {
-      const response = await fetch('http://localhost:5000/create_vm', {
+      const response = await fetch('http://localhost:5000/create_vmprox', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           proxmoxIp: proxmoxIp,
-          proxmoxPassword: password,
+          password: password,
           hostname: hostname,
           ram: parseInt(ram, 10),
           cpu: parseInt(cpu, 10),
           targetNode: nodeName,
           network: network,
+          vm_id: vm_id,
         }),
       });
 
@@ -55,6 +97,29 @@ const Formulaire = () => {
 
       const result = await response.json();
       console.log(result.message);
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    const configResponse = await fetch('http://localhost:5000/conf_vmprox', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        proxmoxIp: proxmoxIp,
+        password: password,
+        vm_id: vm_id,
+        ram: ram,
+        cpu: cpu,
+        network_ip: vmIp, 
+      }),
+    });
+
+    if (!configResponse.ok) {
+      throw new Error('Erreur lors de la configuration de la VM');
+    }
+
+    const configResult = await configResponse.json();
+    console.log(configResult.message);
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
       // Si la création de la VM réussit, mettez à jour son statut dans la liste
       const updatedVMs = currentVMs.map((vm) =>
@@ -69,6 +134,8 @@ const Formulaire = () => {
       );
       localStorage.setItem('vms', JSON.stringify(updatedVMs));
     }
+    
+
   };
 
   return (
@@ -93,7 +160,7 @@ const Formulaire = () => {
           required
         />
 
-        <label className="block text-sm font-medium">RAM (Mo):</label>
+        <label className="block text-sm font-medium">RAM (Mo) (max {maxRam} Mo):</label>
         <input
           type="number"
           placeholder="Enter RAM"
@@ -101,9 +168,11 @@ const Formulaire = () => {
           onChange={(e) => setRam(e.target.value)}
           className="w-full p-2 border rounded mb-4"
           required
+          min="512"
+          max={maxRam}
         />
 
-        <label className="block text-sm font-medium">CPU:</label>
+        <label className="block text-sm font-medium">CPU (max {maxCpu} cœurs):</label>
         <input
           type="number"
           placeholder="Enter CPU Cores"
@@ -111,6 +180,8 @@ const Formulaire = () => {
           onChange={(e) => setCpu(e.target.value)}
           className="w-full p-2 border rounded mb-4"
           required
+          min="1"
+          max={maxCpu}
         />
 
         <label className="block text-sm font-medium">Network:</label>
