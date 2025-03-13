@@ -1182,7 +1182,10 @@ def create_cluster():
         HDFS_DATANODE_USER: vagrant
         HDFS_SECONDARYNAMENODE_USER: vagrant
       executable: /bin/bash
-
+- name: Démarrer le ResourceManager sur le nœud dédié
+  hosts: resourcemanager
+  become: yes
+  tasks:
     - name: Démarrer YARN
       shell: "/opt/hadoop/sbin/start-yarn.sh"
       become_user: vagrant
