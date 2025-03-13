@@ -1,11 +1,24 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-
+import OSVersionSelect from './OSVersionSelect';
+import CustomBox from './CustomBox';
 export default function ClusterFormVir() {
   const location = useLocation();
   const navigate = useNavigate();
+  const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
+  const [customRam, setCustomRam] = useState(4);
+  const [customCpu, setCustomCpu] = useState(2);
+  const [customBoxes, setCustomBoxes] = useState(() => {
+    // Récupérer les boxes personnalisées depuis localStorage
+    const savedBoxes = localStorage.getItem("customBoxes");
+    return savedBoxes ? JSON.parse(savedBoxes) : []; // Si aucune box n'est trouvée, retourner un tableau vide
+  });
+  const [osOptions, setOsOptions] = useState(() => {
+    const savedOptions = localStorage.getItem("osOptions");
+    return savedOptions ? JSON.parse(savedOptions) : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
+  });
   // Récupération des données globales du cluster transmises depuis ClusterVir
-  const { clusterName, clusterDescription, nodeCount, clusterType, clusterIp, gateway, nameservers } = location.state;
+  const { clusterName, clusterDescription, nodeCount, clusterType, isHaSelected } = location.state;
 
   const [currentNode, setCurrentNode] = useState(0);
   const [nodeDetails, setNodeDetails] = useState(
@@ -21,6 +34,16 @@ export default function ClusterFormVir() {
       isDataNode: false,
     }))
   );
+  useEffect(() => {
+    const handleStorageChange = (e) => {
+      if (e.key === "osOptions") {
+        setOsOptions(JSON.parse(e.newValue));
+      }
+    };
+
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
 
   const handleNodeDetailsChange = (field, value) => {
     setNodeDetails((prev) => {
@@ -29,6 +52,22 @@ export default function ClusterFormVir() {
       return updatedDetails;
     });
   };
+  const handleAddCustomBox = ({ name, ram, cpu }) => {
+    const updatedBoxes = [...customBoxes, { name, ram, cpu }];
+    const updatedOptions = [...osOptions, name];
+
+    setCustomBoxes(updatedBoxes);
+    setOsOptions(updatedOptions);
+
+    // Mettre à jour localStorage
+    localStorage.setItem("customBoxes", JSON.stringify(updatedBoxes));
+    localStorage.setItem("osOptions", JSON.stringify(updatedOptions));
+  };
+  const [haComponents, setHaComponents] = useState({
+    isZookeeper: false,
+    isNamenodeStandby: false,
+    isResourceManagerStandby: false,
+  });
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -54,12 +93,11 @@ export default function ClusterFormVir() {
       const clusterData = {
         clusterName,
         clusterDescription,
-        clusterIp,
         nodeCount,
         clusterType,
-        gateway, // passerelle
-        nameservers: nameservers.split(",").map((ns) => ns.trim()),
         nodeDetails,
+        haComponents,
+        customBoxes,
       };
 
       fetch("http://localhost:5000/create_cluster", {
@@ -109,17 +147,23 @@ export default function ClusterFormVir() {
           placeholder={`Enter host name ${currentNode + 1}`}
           required
         />
-
-        <label className="block text-sm font-medium mb-2">OS Version:</label>
-        <select
+        <OSVersionSelect
           value={nodeDetails[currentNode].osVersion}
-          onChange={(e) => handleNodeDetailsChange("osVersion", e.target.value)}
-          className="w-full p-2 border rounded mb-4"
-        >
-          <option value="ubuntu/trusty64">ubuntu/trusty64</option>
-          <option value="ubuntu-focal">Ubuntu-focal</option>
-          <option value="ubuntu-bionic">Ubuntu-bionic</option>
-        </select>
+          onChange={(value) => handleNodeDetailsChange("osVersion", value)}
+          onCustomBoxSelect={setIsCustomBoxOpen}
+          options={osOptions} // Passer la liste des options dynamiques
+        />
+        {isCustomBoxOpen && (
+          <CustomBox
+            ram={customRam}
+            cpu={customCpu}
+            onRamChange={setCustomRam}
+            onCpuChange={setCustomCpu}
+            onClose={() => setIsCustomBoxOpen(false)}
+            onAddBox={handleAddCustomBox} // Assurez-vous que c'est bien passé ici
+          />
+        )}
+       
 
         <label className="block text-sm font-medium">RAM: {nodeDetails[currentNode].ram} GB</label>
         <input
@@ -191,6 +235,38 @@ export default function ClusterFormVir() {
             <span className="ml-2 text-gray-700">Data Node</span>
           </label>
         </div>
+        {isHaSelected && (
+          <div className="mb-4">
+            <label className="inline-flex items-center">
+              <input
+                type="checkbox"
+                checked={haComponents.isZookeeper}
+                onChange={(e) => setHaComponents({ ...haComponents, isZookeeper: e.target.checked })}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Zookeeper</span>
+            </label>
+            <label className="inline-flex items-center ml-4">
+              <input
+                type="checkbox"
+                checked={haComponents.isNamenodeStandby}
+                onChange={(e) => setHaComponents({ ...haComponents, isNamenodeStandby: e.target.checked })}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Namenode Standby</span>
+            </label>
+            <label className="inline-flex items-center ml-4">
+              <input
+                type="checkbox"
+                checked={haComponents.isResourceManagerStandby}
+                onChange={(e) => setHaComponents({ ...haComponents, isResourceManagerStandby: e.target.checked })}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Resource Manager Standby</span>
+            </label>
+          </div>
+
+        )}
 
         <button
           type="submit"

@@ -1,10 +1,17 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
+import OSVersionSelect from './OSVersionSelect'; // Assurez-vous d'importer le composant
+import CustomBox from './CustomBox'; 
 
 export default function Formulaire() {
   const [hostname, setHostname] = useState("");
   const [box, setBox] = useState("ubuntu/trusty64");
   const [ram, setRam] = useState(2);
+  const [customBoxes, setCustomBoxes] = useState(() => {
+    // Récupérer les boxes personnalisées depuis localStorage
+    const savedBoxes = localStorage.getItem("customBoxes");
+    return savedBoxes ? JSON.parse(savedBoxes) : []; // Si aucune box n'est trouvée, retourner un tableau vide
+  });
   const [totalMemoryGB, setMaxRam] = useState(16);
   const [cpu, setCpu] = useState(1);
   const [maxCpu, setMaxCpu] = useState(8);
@@ -12,9 +19,19 @@ export default function Formulaire() {
   const [submitted, setSubmitted] = useState(false);
   const [ipAddress, setIpAddress] = useState("");
   const [port, setPort] = useState("");
+  const [osVersion, setOsVersion] = useState("ubuntu/trusty64");
+
 
   const navigate = useNavigate();
   const location = useLocation();
+  const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
+  const [customRam, setCustomRam] = useState(4);
+  const [customCpu, setCustomCpu] = useState(2);
+  const [osOptions, setOsOptions] = useState(() => {
+    const savedOptions = localStorage.getItem("osOptions");
+    return savedOptions ? JSON.parse(savedOptions) : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
+  });
+
   const remoteConfig = location.state || {};
   const isRemote = remoteConfig.mode === "distant";
 
@@ -54,6 +71,41 @@ export default function Formulaire() {
       
   }, [isRemote]);
 
+
+  useEffect(() => {
+    const handleStorageChange = (e) => {
+      if (e.key === "osOptions") {
+        setOsOptions(JSON.parse(e.newValue));
+      }
+    };
+
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
+
+  const handleNodeDetailsChange = (field, value) => {
+    if (field === "osVersion") {
+      setOsVersion(value);
+      if (value === "Box-perso") {
+        setIsCustomBoxOpen(true);
+      } else {
+        setIsCustomBoxOpen(false);
+      }
+    }
+  };
+  const handleAddCustomBox = ({ name, ram, cpu }) => {
+    const updatedBoxes = [...customBoxes, { name, ram, cpu }];
+    const updatedOptions = [...osOptions, name];
+
+    setCustomBoxes(updatedBoxes);
+    setOsOptions(updatedOptions);
+
+    // Mettre à jour localStorage
+    localStorage.setItem("customBoxes", JSON.stringify(updatedBoxes));
+    localStorage.setItem("osOptions", JSON.stringify(updatedOptions));
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -67,7 +119,8 @@ export default function Formulaire() {
       box: box,
       ram: ram,
       cpu: cpu,
-      network: network
+      network: network,
+      customBoxes: customBoxes,
     };
 
     if (isRemote) {
@@ -145,6 +198,22 @@ export default function Formulaire() {
             className="w-full p-2 border rounded mb-4"
             required
           />
+          <OSVersionSelect
+            value={osVersion}
+            onChange={(value) => handleNodeDetailsChange("osVersion", value)}
+            onCustomBoxSelect={setIsCustomBoxOpen}
+            options={osOptions}
+          />
+          {isCustomBoxOpen && (
+            <CustomBox
+              ram={customRam}
+              cpu={customCpu}
+              onRamChange={setCustomRam}
+              onCpuChange={setCustomCpu}
+              onClose={() => setIsCustomBoxOpen(false)}
+              onAddBox={handleAddCustomBox}
+            />
+          )}
 
           <label className="block text-sm font-medium">Box:</label>
           <select
