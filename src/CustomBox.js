@@ -67,6 +67,8 @@ const CustomBox = ({ onClose, onAddBox }) => {
 
                 <label className="block text-sm font-medium">Box name :</label>
                 <input
+                    placeholder="Set your box name..."
+
                     type="text"
                     value={boxName}
                     onChange={(e) => setBoxName(e.target.value)}
@@ -81,13 +83,24 @@ const CustomBox = ({ onClose, onAddBox }) => {
                     className="w-full mb-4"
                     accept=".iso"
                     required
+                /> OR :
+                <input
+                    type="url"
+                    value={isoImage}
+                    placeholder="Or give a URL..."
+                    onChange={(e) => setIsoImage(e.target.value)}
+                    className="w-full p-2 border rounded"
+                    required
                 />
                 {isoImage && <p className="text-gray-600">Select a file {isoImage}</p>}
+               
 
                 <div className="flex space-x-4 mb-4">
                     <div className="flex-1">
                         <label className="block text-sm font-medium mb-2">User name :</label>
                         <input
+                            placeholder="Set your username..."
+
                             type="text"
                             value={username}
                             onChange={(e) => setUsername(e.target.value)}
@@ -99,6 +112,8 @@ const CustomBox = ({ onClose, onAddBox }) => {
                         <label className="block text-sm font-medium mb-2">User password :</label>
                         <input
                             type="password"
+                            placeholder="Set your password..."
+
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                             className="w-full p-2 border rounded"
@@ -111,6 +126,8 @@ const CustomBox = ({ onClose, onAddBox }) => {
                 <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
+                    placeholder="Describe your box ..."
+
                     className="w-full p-2 border rounded mb-4"
                     rows="3"
                 />
