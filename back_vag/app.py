@@ -488,6 +488,7 @@ def create_vm():
     data = request.json
     vm_name = data.get("vm_name")
     box = data.get("box")
+    print(box)
     ram = data.get("ram")
     cpu = data.get("cpu")
     network = data.get("network", "NAT")

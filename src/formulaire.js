@@ -5,7 +5,6 @@ import CustomBox from './CustomBox';
 
 export default function Formulaire() {
   const [hostname, setHostname] = useState("");
-  const [box, setBox] = useState("ubuntu/trusty64");
   const [ram, setRam] = useState(2);
   const [customBoxes, setCustomBoxes] = useState(() => {
     // Récupérer les boxes personnalisées depuis localStorage
@@ -20,8 +19,6 @@ export default function Formulaire() {
   const [ipAddress, setIpAddress] = useState("");
   const [port, setPort] = useState("");
   const [osVersion, setOsVersion] = useState("ubuntu/trusty64");
-
-
   const navigate = useNavigate();
   const location = useLocation();
   const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
@@ -116,7 +113,7 @@ export default function Formulaire() {
 
     const requestData = {
       vm_name: hostname,
-      box: box,
+      box: osVersion,
       ram: ram,
       cpu: cpu,
       network: network,
@@ -150,7 +147,7 @@ export default function Formulaire() {
 
         const newMachine = {
           hostname: hostname,
-          box: box,
+          box: osVersion,
           network: network,
           ram: `${ram} GB`,
           cpu: `${cpu} vCPUs`,
@@ -215,20 +212,7 @@ export default function Formulaire() {
             />
           )}
 
-          <label className="block text-sm font-medium">Box:</label>
-          <select
-            value={box}
-            onChange={(e) => setBox(e.target.value)}
-            className="w-full p-2 border rounded mb-4"
-          >
-            <option>ubuntu/trusty64</option>
-            <option>laravel/homestead</option>
-            <option>hashicorp/precise64</option>
-            <option>centos/7</option>
-            <option>debian/jessie64</option>
-            <option>hashicorp/precise32</option>
-            <option>scotch/box</option>
-          </select>
+        
 
           <label className="block text-sm font-medium">RAM: {ram} GB</label>
           <input

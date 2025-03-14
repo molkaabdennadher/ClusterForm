@@ -85,7 +85,7 @@ const CustomBox = ({ onClose, onAddBox }) => {
                     className="w-full mb-2"
                     accept=".iso"
                 />
-                <div className="text-center mb-2 text-sm text-gray-500">OU</div>
+                <div className="text-center mb-2 text-sm text-gray-500">OR</div>
                 <input
                     type="url"
                     value={isoUrl}
