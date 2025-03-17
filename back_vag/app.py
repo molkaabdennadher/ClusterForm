@@ -1250,6 +1250,203 @@ def create_cluster():
         "inventory_file": inventory_path
     }), 200
 
+##########################################################HA----------------------------------------------------
+@app.route('/create_cluster_ha', methods=['POST'])
+def create_cluster_ha():
+    # 1. Récupérer les données du front-end
+    cluster_data = request.get_json()
+    if not cluster_data:
+        return jsonify({"error": "No data received"}), 400
+
+    cluster_name = cluster_data.get("clusterName")
+    if not cluster_name:
+        return jsonify({"error": "Cluster name is required"}), 400
+
+    # 2. Créer le dossier du cluster
+    print(cluster_data)
+    cluster_folder = get_cluster_folder(cluster_name)
+
+    # 3. Générer et écrire le Vagrantfile
+    vagrantfile_content = generate_vagrantfile(cluster_data)
+    vagrantfile_path = os.path.join(cluster_folder, "Vagrantfile")
+    try:
+        with open(vagrantfile_path, "w", encoding="utf-8") as vf:
+            vf.write(vagrantfile_content)
+    except Exception as e:
+        return jsonify({"error": "Error writing Vagrantfile", "details": str(e)}), 500
+
+    # 4. Lancer les VMs via 'vagrant up'
+    try:
+        subprocess.run(["vagrant", "up"], cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error during 'vagrant up'", "details": str(e)}), 500
+ # 5. Générer l'inventaire Ansible HA
+    node_details = cluster_data.get("nodeDetails", [])
+    inventory_lines = []
+    namenode_lines = []
+    namenode_standby_lines = []
+    resourcemanager_lines = []
+    resourcemanager_standby_lines = []
+    datanodes_lines = []
+    nodemanagers_lines = []
+    zookeeper_lines = []
+    journalnode_lines = []
+
+    for node in node_details:
+        hostname = node.get("hostname")
+        ip = node.get("ip")
+        # NameNode actif et standby
+        if node.get("isNameNode"):
+            namenode_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isNameNodeStandby"):
+            namenode_standby_lines.append(f"{hostname} ansible_host={ip}")
+        # ResourceManager actif et standby
+        if node.get("isResourceManager"):
+            resourcemanager_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isResourceManagerStandby"):
+            resourcemanager_standby_lines.append(f"{hostname} ansible_host={ip}")
+        # DataNodes et NodeManagers
+        if node.get("isDataNode"):
+            datanodes_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isNodeManager"):
+            nodemanagers_lines.append(f"{hostname} ansible_host={ip}")
+        # ZooKeeper et JournalNode
+        if node.get("isZookeeper"):
+            zookeeper_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isJournalNode"):
+            journalnode_lines.append(f"{hostname} ansible_host={ip}")
+
+    if namenode_lines:
+        inventory_lines.append("[namenode]")
+        inventory_lines.extend(namenode_lines)
+    if namenode_standby_lines:
+        inventory_lines.append("[namenode_standby]")
+        inventory_lines.extend(namenode_standby_lines)
+    if resourcemanager_lines:
+        inventory_lines.append("[resourcemanager]")
+        inventory_lines.extend(resourcemanager_lines)
+    if resourcemanager_standby_lines:
+        inventory_lines.append("[resourcemanager_standby]")
+        inventory_lines.extend(resourcemanager_standby_lines)
+    if datanodes_lines:
+        inventory_lines.append("[datanodes]")
+        inventory_lines.extend(datanodes_lines)
+    if nodemanagers_lines:
+        inventory_lines.append("[nodemanagers]")
+        inventory_lines.extend(nodemanagers_lines)
+    if zookeeper_lines:
+        inventory_lines.append("[zookeeper]")
+        inventory_lines.extend(zookeeper_lines)
+    if journalnode_lines:
+        inventory_lines.append("[journalnode]")
+        inventory_lines.extend(journalnode_lines)
+
+    inventory_content = "\n".join(inventory_lines)
+    global_vars = (
+        "[all:vars]\n"
+        "ansible_user=vagrant\n"
+        "ansible_python_interpreter=/usr/bin/python3\n"
+        "ansible_ssh_common_args='-o StrictHostKeyChecking=no'\n\n"
+        "java_home=/usr/lib/jvm/default-java\n"
+        "hadoop_home=/opt/hadoop\n"
+    )
+    inventory_content = global_vars + inventory_content
+
+    inventory_path = os.path.join(cluster_folder, "inventory.ini")
+    try:
+        with open(inventory_path, "w", encoding="utf-8") as inv_file:
+            inv_file.write(inventory_content)
+    except Exception as e:
+        return jsonify({"error": "Error writing inventory file", "details": str(e)}), 500
+
+""" 
+    # --- Installation d'Ansible sur le primary et standby NameNode ---
+    try:
+        namenode_hosts = [line.split()[0] for line in namenode_lines] + [line.split()[0] for line in namenode_standby_lines]
+
+        for namenode in namenode_hosts:
+            check_ansible_cmd = f'vagrant ssh {namenode} -c "which ansible-playbook"'
+            result_ansible = subprocess.run(check_ansible_cmd, shell=True, cwd=cluster_folder,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if not result_ansible.stdout.strip():
+                install_ansible_cmd = f'vagrant ssh {namenode} -c "sudo apt-get update && sudo apt-get install -y ansible"'
+                subprocess.run(install_ansible_cmd, shell=True, cwd=cluster_folder, check=True)
+            else:
+                print(f"Ansible est déjà installé sur {namenode}.")
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing Ansible on NameNodes", "details": str(e)}), 500
+
+    # --- Configuration SSH pour les NameNodes et autres nœuds ---
+    try:
+        namenode_public_keys = {}
+
+        for namenode in namenode_hosts:
+            # Générer une clé SSH si elle n'existe pas
+            gen_key_cmd = f'vagrant ssh {namenode} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+            subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            # Récupérer la clé publique
+            get_pubkey_cmd = f'vagrant ssh {namenode} -c "cat ~/.ssh/id_rsa.pub"'
+            result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        universal_newlines=True, check=True)
+            namenode_public_keys[namenode] = result_pub.stdout.strip()
+            print(f"Public key de {namenode} récupérée :", namenode_public_keys[namenode])
+
+        # Ajouter les clés dans les authorized_keys respectifs
+        for namenode in namenode_hosts:
+            for other_namenode, public_key in namenode_public_keys.items():
+                add_key_cmd = (
+                    f'vagrant ssh {namenode} -c "mkdir -p ~/.ssh && '
+                    f'grep -q {shlex.quote(public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(public_key)} >> ~/.ssh/authorized_keys && '
+                    f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                )
+                subprocess.run(add_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+        # Configuration SSH pour les autres nœuds
+        for node in node_details:
+            node_hostname = node.get("hostname")
+            if node_hostname not in namenode_hosts:
+                # Générer une clé SSH si elle n'existe pas
+                gen_key_cmd = f'vagrant ssh {node_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+                subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                # Récupérer la clé publique
+                get_pubkey_cmd = f'vagrant ssh {node_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+                result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            universal_newlines=True, check=True)
+                node_public_key = result_pub.stdout.strip()
+                print(f"Public key du nœud {node_hostname} récupérée :", node_public_key)
+
+                # Ajouter la clé du nœud dans son authorized_keys
+                add_self_key_cmd = (
+                    f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                    f'grep -q {shlex.quote(node_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(node_public_key)} >> ~/.ssh/authorized_keys && '
+                    f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                )
+                subprocess.run(add_self_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                # Ajouter la clé des NameNodes dans l'authorized_keys du nœud
+                for namenode, public_key in namenode_public_keys.items():
+                    add_namenode_key_cmd = (
+                        f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                        f'grep -q {shlex.quote(public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(public_key)} >> ~/.ssh/authorized_keys && '
+                        f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    )
+                    subprocess.run(add_namenode_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                    # Ajouter la clé du nœud dans l'authorized_keys des NameNodes
+                    add_node_key_to_namenode_cmd = (
+                        f'vagrant ssh {namenode} -c "mkdir -p ~/.ssh && '
+                        f'grep -q {shlex.quote(node_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(node_public_key)} >> ~/.ssh/authorized_keys && '
+                        f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    )
+                    subprocess.run(add_node_key_to_namenode_cmd, shell=True, cwd=cluster_folder, check=True)
+
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error configuring SSH", "details": str(e)}), 500
+"""
 
 if __name__ == '__main__':
     app.run(debug=True)
