@@ -1486,8 +1486,53 @@ def create_cluster_ha():
             subprocess.run(extract_zk_cmd, shell=True, cwd=cluster_folder, check=True)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error installing ZooKeeper on NameNode", "details": str(e)}), 500
+    
+    # 6. Installation de Hadoop sur le primary NameNode et synchronisation de l'archive dans /vagrant
+    try:
+        primary_namenode = get_nameNode_hostname(cluster_data)
+        if not primary_namenode:
+            return jsonify({"error": "No NameNode found in cluster configuration"}), 400
 
-    # 6. Transférer l’archive ZooKeeper aux autres nœuds (si besoin)
+        check_archive_cmd = f'vagrant ssh {primary_namenode} -c "test -f /vagrant/hadoop.tar.gz"'
+        result = subprocess.run(check_archive_cmd, shell=True, cwd=cluster_folder)
+        if result.returncode != 0:
+            hadoop_install_cmd = (
+                f'vagrant ssh {primary_namenode} -c "sudo apt-get update && sudo apt-get install -y wget && '
+                f'wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && '
+                f'test -s /tmp/hadoop.tar.gz && '
+                f'sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && '
+                f'sudo mv /opt/hadoop-3.3.1 /opt/hadoop && '
+                f'rm /tmp/hadoop.tar.gz"'
+            )
+            subprocess.run(hadoop_install_cmd, shell=True, cwd=cluster_folder, check=True)
+            tar_hadoop_cmd = f'vagrant ssh {primary_namenode} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
+            subprocess.run(tar_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
+            copy_to_shared_cmd = f'vagrant ssh {primary_namenode} -c "sudo cp /tmp/hadoop.tar.gz /vagrant/hadoop.tar.gz"'
+            subprocess.run(copy_to_shared_cmd, shell=True, cwd=cluster_folder, check=True)
+        else:
+            print("L'archive Hadoop existe déjà dans /vagrant/hadoop.tar.gz, extraction sur le primary NameNode.")
+            extract_cmd = f'vagrant ssh {primary_namenode} -c "sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+            subprocess.run(extract_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing Hadoop on primary NameNode", "details": str(e)}), 500
+
+    # 8.1 Synchroniser l'archive Hadoop sur les autres nœuds
+    for node in cluster_data.get("nodeDetails", []):
+        if node.get("hostname") != primary_namenode:
+            target_hostname = node.get("hostname")
+            try:
+                copy_hadoop_cmd = (
+                    f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && '
+                    f'sudo rm -rf /opt/hadoop && '
+                    f'sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+                )
+                subprocess.run(copy_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
+            except subprocess.CalledProcessError as e:
+                return jsonify({
+                    "error": f"Error copying Hadoop to node {target_hostname}",
+                    "details": str(e)
+                }), 500
+# 7. Transférer l’archive ZooKeeper aux autres nœuds (si besoin)
     # On identifie les nœuds qui doivent avoir ZooKeeper. Par exemple, s’ils ont isZookeeper = True
     for node in cluster_data["nodeDetails"]:
         if node.get("isZookeeper", False):
@@ -1507,12 +1552,28 @@ def create_cluster_ha():
                         "error": f"Error copying/extracting ZooKeeper on node {target_hostname}",
                         "details": str(e)
                     }), 500
-    return jsonify({
+# 8. Installer Java, net-tools, python3 et configurer l'environnement sur tous les nœuds
+    for node in cluster_data.get("nodeDetails", []):
+        target_hostname = node.get("hostname")
+        try:
+            install_java_net_cmd = (
+                f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
+            )
+            subprocess.run(install_java_net_cmd, shell=True, cwd=cluster_folder, check=True)
+            configure_env_cmd = (
+                f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
+                f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
+                f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
+            )
+            subprocess.run(configure_env_cmd, shell=True, cwd=cluster_folder, check=True)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": f"Error configuring environment on node {target_hostname}", "details": str(e)}), 500
+
+        return jsonify({
         "message": f"Cluster HA '{cluster_name}' created successfully.",
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path,
         "haComponents": cluster_data.get("haComponents")
     }), 200
-
 if __name__ == '__main__':
     app.run(debug=True)
