@@ -1136,10 +1136,6 @@ def create_cluster():
     hadoop_config_playbook_path = os.path.join(cluster_folder, "hadoop_config.yml")
     with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
         f.write(hadoop_config_playbook)
-
-     # Création du playbook Ansible pour démarrer les services Hadoop
-     # Création du playbook Ansible pour démarrer les services Hadoop
-   
    
     # Création du playbook Ansible pour démarrer les services Hadoop
     hadoop_start_playbook = """---
@@ -1263,7 +1259,7 @@ def get_nameNode_hostname(cluster_data):
 
 @app.route('/create_cluster_ha', methods=['POST'])
 def create_cluster_ha():
-    # 1. Récupérer les données du front-end
+ # 1. Récupérer les données du front-end
     cluster_data = request.get_json()
     if not cluster_data:
         return jsonify({"error": "No data received"}), 400
@@ -1272,11 +1268,11 @@ def create_cluster_ha():
     if not cluster_name:
         return jsonify({"error": "Cluster name is required"}), 400
 
-    # 2. Créer le dossier du cluster
+# 2. Créer le dossier du cluster
     print(cluster_data)
     cluster_folder = get_cluster_folder(cluster_name)
 
-    # 3. Générer et écrire le Vagrantfile
+# 3. Générer et écrire le Vagrantfile
     vagrantfile_content = generate_vagrantfile(cluster_data)
     vagrantfile_path = os.path.join(cluster_folder, "Vagrantfile")
     try:
@@ -1285,12 +1281,12 @@ def create_cluster_ha():
     except Exception as e:
         return jsonify({"error": "Error writing Vagrantfile", "details": str(e)}), 500
 
-    # 4. Lancer les VMs via 'vagrant up'
+# 4. Lancer les VMs via 'vagrant up'
     try:
         subprocess.run(["vagrant", "up"], cwd=cluster_folder, check=True)
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error during 'vagrant up'", "details": str(e)}), 500
- # 5. Générer l'inventaire Ansible HA
+# 5. Générer l'inventaire Ansible HA
     node_details = cluster_data.get("nodeDetails", [])
     inventory_lines = []
     namenode_lines = []
@@ -1487,7 +1483,7 @@ def create_cluster_ha():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error installing ZooKeeper on NameNode", "details": str(e)}), 500
     
-    # 6. Installation de Hadoop sur le primary NameNode et synchronisation de l'archive dans /vagrant
+# 6. Installation de Hadoop sur le primary NameNode et synchronisation de l'archive dans /vagrant
     try:
         primary_namenode = get_nameNode_hostname(cluster_data)
         if not primary_namenode:
@@ -1552,7 +1548,7 @@ def create_cluster_ha():
                         "error": f"Error copying/extracting ZooKeeper on node {target_hostname}",
                         "details": str(e)
                     }), 500
-    # 8. Installer Java, net-tools, python3 et configurer l'environnement sur tous les nœuds
+# 8. Installer Java, net-tools, python3 et configurer l'environnement sur tous les nœuds
     for node in cluster_data.get("nodeDetails", []):
         target_hostname = node.get("hostname")
         try:
@@ -1585,6 +1581,307 @@ def create_cluster_ha():
         except subprocess.CalledProcessError as e:
             return jsonify({"error": f"Error configuring environment on node {target_hostname}", "details": str(e)}), 500
 
+# 10. Création des playbooks Ansible pour la configuration HA Hadoop
+    templates_dir = os.path.join(cluster_folder, "templates")
+    os.makedirs(templates_dir, exist_ok=True)
+
+# Template core-site.xml HA
+    core_site_template = """<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://ha-cluster:9000</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "core-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(core_site_template)
+
+# Template hdfs-site.xml HA
+# On utilise désormais les groupes [namenode] et [namenode_standby] séparément
+    hdfs_site_template = """<configuration>
+  <property>
+    <name>dfs.nameservices</name>
+    <value>ha-cluster</value>
+  </property>
+  <property>
+    <name>dfs.ha.namenodes.ha-cluster</name>
+    <value>{{ groups['namenode'][0] }},{{ groups['namenode_standby'][0] }}</value>
+  </property>
+  <property>
+    <name>dfs.namenode.rpc-address.ha-cluster.namenode1</name>
+    <value>{{ groups['namenode'][0] }}:8020</value>
+  </property>
+  <property>
+    <name>dfs.namenode.rpc-address.ha-cluster.namenode2</name>
+    <value>{{ groups['namenode_standby'][0] }}:8020</value>
+  </property>
+  <property>
+    <name>dfs.namenode.shared.edits.dir</name>
+    <value>qjournal://{% for jn in groups['journalnode'] %}{{ hostvars[jn].ansible_host }}:8485{% if not loop.last %};{% endif %}{% endfor %}/ha-cluster</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "hdfs-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(hdfs_site_template)
+
+# Template yarn-site.xml HA
+# On utilise les groupes [resourcemanager] et [resourcemanager_standby]
+    yarn_site_template = """<configuration>
+  <property>
+    <name>yarn.resourcemanager.ha.enabled</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.cluster-id</name>
+    <value>yarn-cluster</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.ha.rm-ids</name>
+    <value>{{ groups['resourcemanager'][0] }},{{ groups['resourcemanager_standby'][0] }}</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.hostname.rm1</name>
+    <value>{{ groups['resourcemanager'][0] }}</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.hostname.rm2</name>
+    <value>{{ groups['resourcemanager_standby'][0] }}</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "yarn-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(yarn_site_template)
+
+# Template mapred-site.xml
+    mapred_site_template = """<configuration>
+  <property>
+    <name>mapreduce.framework.name</name>
+    <value>yarn</value>
+  </property>
+</configuration>
+"""
+    with open(os.path.join(templates_dir, "mapred-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(mapred_site_template)
+
+# Template masters (active NameNode)
+    masters_template = """{{ groups['namenode'][0] }}
+"""
+    with open(os.path.join(templates_dir, "masters.j2"), "w", encoding="utf-8") as f:
+        f.write(masters_template)
+
+# Template workers (DataNodes)
+    workers_template = """{% for worker in groups['datanodes'] %}
+{{ worker }}
+{% endfor %}
+"""
+    with open(os.path.join(templates_dir, "workers.j2"), "w", encoding="utf-8") as f:
+        f.write(workers_template)
+
+# Template ZooKeeper
+    zk_template = """{% for zk in groups['zookeeper'] %}
+{{ hostvars[zk].ansible_host }} {{ zk }}
+{% endfor %}
+"""
+    with open(os.path.join(templates_dir, "zookeeper.j2"), "w", encoding="utf-8") as f:
+        f.write(zk_template)
+# Template hosts.j2
+    hosts_template = """# ANSIBLE GENERATED HOSTS FILE
+    {% for host in groups['all'] %}
+    {{ hostvars[host].ansible_host }} {{ host }}
+    {% endfor %}
+    """
+    with open(os.path.join(templates_dir, "hosts.j2"), "w", encoding="utf-8") as f:
+        f.write(hosts_template)
+
+# Création du playbook de configuration HA Hadoop
+    hadoop_config_playbook = """---
+- name: Configurer HA Hadoop et mettre à jour /etc/hosts
+  hosts: all
+  become: yes
+  vars:
+      namenode_hostname: "{{ groups['namenode'][0] }}"
+  tasks:
+      - name: Déployer core-site.xml
+        template:
+            src: templates/core-site.xml.j2
+            dest: "{{ hadoop_home }}/etc/hadoop/core-site.xml"
+
+      - name: Déployer hdfs-site.xml
+        template:
+            src: templates/hdfs-site.xml.j2
+            dest: "{{ hadoop_home }}/etc/hadoop/hdfs-site.xml"
+
+      - name: Déployer yarn-site.xml
+        template:
+            src: templates/yarn-site.xml.j2
+            dest: "{{ hadoop_home }}/etc/hadoop/yarn-site.xml"
+
+      - name: Déployer mapred-site.xml
+        template:
+            src: templates/mapred-site.xml.j2
+            dest: "{{ hadoop_home }}/etc/hadoop/mapred-site.xml"
+
+      - name: Déployer masters
+        template:
+            src: templates/masters.j2
+            dest: "{{ hadoop_home }}/etc/hadoop/masters"
+
+      - name: Déployer workers
+        template:
+            src: templates/workers.j2
+            dest: "{{ hadoop_home }}/etc/hadoop/workers"
+
+      - name: Mettre à jour /etc/hosts avec les hôtes du cluster
+        template:
+            src: templates/hosts.j2
+            dest: /etc/hosts
+"""
+    hadoop_config_playbook_path = os.path.join(cluster_folder, "hadoop_config.yml")
+    try:
+        with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
+            f.write(hadoop_config_playbook)
+    except Exception as e:
+        return jsonify({"error": "Error writing HA config playbook", "details": str(e)}), 500
+
+# Création du playbook de démarrage HA Hadoop
+    hadoop_start_playbook = """---
+- name: Démarrer les services HDFS sur les NameNodes (actif et standby)
+  hosts: namenode
+  become: yes
+  tasks:
+      - name: Mettre à jour hadoop-env.sh pour définir JAVA_HOME
+        shell: |
+            if grep -q '^export JAVA_HOME=' {{ hadoop_home }}/etc/hadoop/hadoop-env.sh; then
+                sed -i 's|^export JAVA_HOME=.*|export JAVA_HOME={{ java_home }}|' {{ hadoop_home }}/etc/hadoop/hadoop-env.sh;
+            else
+                echo 'export JAVA_HOME={{ java_home }}' >> {{ hadoop_home }}/etc/hadoop/hadoop-env.sh;
+            fi
+        args:
+            executable: /bin/bash
+
+      - name: Créer le répertoire de logs
+        file:
+            path: "{{ hadoop_home }}/logs"
+            state: directory
+            owner: vagrant
+            group: vagrant
+            mode: '0755'
+
+      - name: Formater le NameNode (si nécessaire)
+        shell: "{{ hadoop_home }}/bin/hdfs namenode -format -force -nonInteractive"
+        args:
+            creates: "/var/hadoop/hdfs/namenode/current/VERSION"
+        become_user: vagrant
+        environment:
+            JAVA_HOME: "{{ java_home }}"
+        executable: /bin/bash
+
+      - name: Démarrer HDFS
+        shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+        become_user: vagrant
+        environment:
+            JAVA_HOME: "{{ java_home }}"\n            HDFS_NAMENODE_USER: vagrant\n            HDFS_DATANODE_USER: vagrant\n            HDFS_SECONDARYNAMENODE_USER: vagrant
+        executable: /bin/bash
+
+- name: Démarrer les services YARN sur les ResourceManagers (actif et standby)
+  hosts: resourcemanager
+  become: yes
+  tasks:
+      - name: Démarrer YARN
+        shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+        become_user: vagrant
+        environment:
+            JAVA_HOME: "{{ java_home }}"
+        executable: /bin/bash
+
+      - name: Démarrer explicitement le ResourceManager en arrière-plan
+        shell: "nohup {{ hadoop_home }}/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
+        become_user: vagrant
+        environment:
+            JAVA_HOME: "{{ java_home }}"
+        executable: /bin/bash
+
+      - name: Pause pour permettre au ResourceManager de démarrer
+        pause:
+            seconds: 20
+
+- name: Démarrer le NodeManager sur les DataNodes (NodeManagers)
+  hosts: nodemanagers
+  become: yes
+  tasks:
+      - name: Démarrer le NodeManager
+        shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start nodemanager"
+        become_user: vagrant
+        environment:
+            JAVA_HOME: "{{ java_home }}"
+        executable: /bin/bash
+
+- name: Démarrer ZooKeeper et JournalNodes sur les nœuds ZooKeeper
+  hosts: zookeeper
+  become: yes
+  tasks:
+      - name: Installer ZooKeeper (si nécessaire)
+        apt:
+            name: zookeeperd
+            state: present
+        when: ansible_os_family == "Debian"
+      - name: Démarrer ZooKeeper
+        shell: "zkServer.sh start"
+        become_user: vagrant
+        environment:
+            ZOO_LOG_DIR: "/var/log/zookeeper"
+            ZOO_CONF_DIR: "/etc/zookeeper/conf"
+        executable: /bin/bash
+      - name: Démarrer le JournalNode (sur le même nœud que ZooKeeper)
+        shell: "{{ hadoop_home }}/bin/hdfs --daemon start journalnode"
+        become_user: vagrant
+        environment:
+            JAVA_HOME: "{{ java_home }}"
+        executable: /bin/bash
+
+- name: Vérifier les services Hadoop (jps)
+  hosts: hadoop
+  become: yes
+  tasks:
+      - name: Vérifier les processus avec jps
+        shell: "jps"
+        register: jps_output
+        become_user: vagrant
+        executable: /bin/bash
+      - name: Afficher la sortie de jps
+        debug:
+            var: jps_output.stdout
+"""
+    hadoop_start_playbook_path = os.path.join(cluster_folder, "hadoop_start_services.yml")
+    try:
+        with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
+            f.write(hadoop_start_playbook)
+    except Exception as e:
+        return jsonify({"error": "Error writing HA start playbook", "details": str(e)}), 500
+
+    # Définir le préfixe pour ansible-playbook (si besoin)
+    ansible_cmd_prefix = ""
+    if platform.system() == "Windows":
+        ansible_cmd_prefix = ""  # Ne pas utiliser "wsl" si non applicable
+
+# 11. Exécuter le playbook de configuration HA sur tous les nœuds
+    try:
+        inventory_file_in_vm = os.path.basename(inventory_path)
+        config_cmd = (
+            f'vagrant ssh {namenode_lines[0].split()[0]} -c "cd /vagrant && {ansible_cmd_prefix}ansible-playbook -i {inventory_file_in_vm} hadoop_config.yml"'
+        )
+        subprocess.run(config_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error configuring HA Hadoop", "details": str(e)}), 500
+
+# 12. Exécuter le playbook de démarrage HA sur tous les nœuds
+    try:
+        start_cmd = (
+            f'vagrant ssh {namenode_lines[0].split()[0]} -c "cd /vagrant && {ansible_cmd_prefix}ansible-playbook -i {inventory_file_in_vm} hadoop_start_services.yml"'
+        )
+        subprocess.run(start_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error starting HA Hadoop services", "details": str(e)}), 500
     return jsonify({
         "message": f"Cluster HA '{cluster_name}' created successfully.",
         "cluster_folder": cluster_folder,
