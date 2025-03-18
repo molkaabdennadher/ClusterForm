@@ -1552,7 +1552,7 @@ def create_cluster_ha():
                         "error": f"Error copying/extracting ZooKeeper on node {target_hostname}",
                         "details": str(e)
                     }), 500
-# 8. Installer Java, net-tools, python3 et configurer l'environnement sur tous les nœuds
+    # 8. Installer Java, net-tools, python3 et configurer l'environnement sur tous les nœuds
     for node in cluster_data.get("nodeDetails", []):
         target_hostname = node.get("hostname")
         try:
@@ -1560,20 +1560,37 @@ def create_cluster_ha():
                 f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
             )
             subprocess.run(install_java_net_cmd, shell=True, cwd=cluster_folder, check=True)
-            configure_env_cmd = (
+
+            # Configuration des variables d'environnement pour Hadoop
+            configure_env_cmd1 = (
                 f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
                 f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
                 f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
             )
-            subprocess.run(configure_env_cmd, shell=True, cwd=cluster_folder, check=True)
+            subprocess.run(configure_env_cmd1, shell=True, cwd=cluster_folder, check=True)
+
+            # Configuration des variables d'environnement pour ZooKeeper
+            configure_env_cmd2 = (
+                f'vagrant ssh {target_hostname} -c "echo \'export ZOOKEEPER_HOME=/etc/zookeeper\' >> ~/.bashrc && '
+                f'echo \'export PATH=$PATH:$ZOOKEEPER_HOME/bin\' >> ~/.bashrc && '
+                f'echo \'export ZOO_LOG_DIR=/var/log/zookeeper\' >> ~/.bashrc"'
+            )
+            subprocess.run(configure_env_cmd2, shell=True, cwd=cluster_folder, check=True)
+
+            # Optionnel : recharger l'environnement (bien que dans un shell non-interactif, ce soit parfois inutile)
+            refresh_env_cmd = f'vagrant ssh {target_hostname} -c "source ~/.bashrc"'
+            subprocess.run(refresh_env_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            print(f"Configuration d'environnement terminée sur {target_hostname}")
         except subprocess.CalledProcessError as e:
             return jsonify({"error": f"Error configuring environment on node {target_hostname}", "details": str(e)}), 500
 
-        return jsonify({
+    return jsonify({
         "message": f"Cluster HA '{cluster_name}' created successfully.",
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path,
         "haComponents": cluster_data.get("haComponents")
     }), 200
+
 if __name__ == '__main__':
     app.run(debug=True)
