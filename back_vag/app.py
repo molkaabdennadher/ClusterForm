@@ -1251,6 +1251,16 @@ def create_cluster():
     }), 200
 
 ##########################################################HA----------------------------------------------------
+def get_nameNode_hostname(cluster_data):
+    """
+    Récupère le hostname du NameNode principal depuis les données du cluster.
+    Si plusieurs NameNodes sont trouvés, on prend le premier.
+    """
+    for node in cluster_data.get("nodeDetails", []):
+        if node.get("isNameNode", False):
+            return node["hostname"]
+    return None  # Aucun NameNode trouvé
+
 @app.route('/create_cluster_ha', methods=['POST'])
 def create_cluster_ha():
     # 1. Récupérer les données du front-end
@@ -1359,7 +1369,6 @@ def create_cluster_ha():
     except Exception as e:
         return jsonify({"error": "Error writing inventory file", "details": str(e)}), 500
 
-""" 
     # --- Installation d'Ansible sur le primary et standby NameNode ---
     try:
         namenode_hosts = [line.split()[0] for line in namenode_lines] + [line.split()[0] for line in namenode_standby_lines]
@@ -1446,7 +1455,64 @@ def create_cluster_ha():
 
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error configuring SSH", "details": str(e)}), 500
-"""
+
+    # 5. Installation de ZooKeeper sur le NameNode
+    # On suppose qu’on a déjà un nameNode_hostname
+    nameNode_hostname = get_nameNode_hostname(cluster_data)  
+    try:
+        # Vérifier si l'archive ZooKeeper existe déjà dans /vagrant/zookeeper.tar.gz
+        check_zk_archive_cmd = f'vagrant ssh {nameNode_hostname} -c "test -f /vagrant/zookeeper.tar.gz"'
+        result = subprocess.run(check_zk_archive_cmd, shell=True, cwd=cluster_folder)
+        if result.returncode != 0:
+            # L'archive n'existe pas : installer ZooKeeper sur le NameNode
+            install_zk_cmd = (
+                f'vagrant ssh {nameNode_hostname} -c "sudo apt-get update && '
+                f'sudo apt-get install -y zookeeperd"'
+            )
+            subprocess.run(install_zk_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            # Archiver l'installation de ZooKeeper
+            # On suppose que zookeeperd installe la config dans /etc/zookeeper
+            # et les binaires dans /usr/share/zookeeper
+            tar_zk_cmd = f'vagrant ssh {nameNode_hostname} -c "sudo tar -czf /tmp/zookeeper.tar.gz -C /etc zookeeper"'
+            subprocess.run(tar_zk_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            # Copier l'archive dans /vagrant
+            copy_zk_cmd = f'vagrant ssh {nameNode_hostname} -c "sudo cp /tmp/zookeeper.tar.gz /vagrant/zookeeper.tar.gz"'
+            subprocess.run(copy_zk_cmd, shell=True, cwd=cluster_folder, check=True)
+        else:
+            print("L'archive ZooKeeper existe déjà dans /vagrant/zookeeper.tar.gz. Extraction sur le NameNode.")
+            extract_zk_cmd = f'vagrant ssh {nameNode_hostname} -c "sudo rm -rf /etc/zookeeper && sudo tar -xzf /vagrant/zookeeper.tar.gz -C /etc"'
+            subprocess.run(extract_zk_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing ZooKeeper on NameNode", "details": str(e)}), 500
+
+    # 6. Transférer l’archive ZooKeeper aux autres nœuds (si besoin)
+    # On identifie les nœuds qui doivent avoir ZooKeeper. Par exemple, s’ils ont isZookeeper = True
+    for node in cluster_data["nodeDetails"]:
+        if node.get("isZookeeper", False):
+            target_hostname = node["hostname"]
+            if target_hostname != nameNode_hostname:
+                try:
+                    # Extraire l’archive sur le nœud
+                    copy_extract_cmd = (
+                        f'vagrant ssh {target_hostname} -c "sudo apt-get update && '
+                        f'sudo apt-get install -y openssh-client && '
+                        f'sudo rm -rf /etc/zookeeper && '
+                        f'sudo tar -xzf /vagrant/zookeeper.tar.gz -C /etc"'
+                    )
+                    subprocess.run(copy_extract_cmd, shell=True, cwd=cluster_folder, check=True)
+                except subprocess.CalledProcessError as e:
+                    return jsonify({
+                        "error": f"Error copying/extracting ZooKeeper on node {target_hostname}",
+                        "details": str(e)
+                    }), 500
+    return jsonify({
+        "message": f"Cluster HA '{cluster_name}' created successfully.",
+        "cluster_folder": cluster_folder,
+        "inventory_file": inventory_path,
+        "haComponents": cluster_data.get("haComponents")
+    }), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
