@@ -63,6 +63,8 @@ useEffect(() => {
       vm_id,
       vmIp,
       status: 'Creating...', // Statut temporaire
+      creationDate: new Date().toLocaleString(), // Ajouter la date de création
+
     };
 
     // Ajoute cette VM à une "liste des VMs" (stockée dans l'état)

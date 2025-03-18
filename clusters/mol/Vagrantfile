@@ -1,0 +1,44 @@
+Vagrant.configure("2") do |config|
+  config.vm.define "dcss" do |machine|
+    machine.vm.box = "ubuntu/bionic64"
+    machine.vm.hostname = "dcss"
+    machine.vm.network "private_network", ip: "dcs"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "dcss"
+      vb.customize ["modifyvm", :id, "--name", "dcss"]
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+
+      vb.memory = "4096"
+      vb.cpus = 2
+    end
+  end
+  config.vm.define "cdsc" do |machine|
+    machine.vm.box = "ubuntu/bionic64"
+    machine.vm.hostname = "cdsc"
+    machine.vm.network "private_network", ip: "cdsdc"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "cdsc"
+      vb.customize ["modifyvm", :id, "--name", "cdsc"]
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+
+      vb.memory = "4096"
+      vb.cpus = 2
+    end
+  end
+  config.vm.define "cdscds" do |machine|
+    machine.vm.box = "ubuntu/bionic64"
+    machine.vm.hostname = "cdscds"
+    machine.vm.network "private_network", ip: "cdscds"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "cdscds"
+      vb.customize ["modifyvm", :id, "--name", "cdscds"]
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+
+      vb.memory = "4096"
+      vb.cpus = 2
+    end
+  end
+end

@@ -21,8 +21,7 @@ export default function FormulaireVir() {
   const navigate = useNavigate();
   const location = useLocation();
   const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
-  const [customRam, setCustomRam] = useState(4);
-  const [customCpu, setCustomCpu] = useState(2);
+
   const [osOptions, setOsOptions] = useState(() => {
     const savedOptions = localStorage.getItem("osOptions");
     return savedOptions ? JSON.parse(savedOptions) : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
@@ -103,7 +102,9 @@ export default function FormulaireVir() {
   };
   
   
-
+  const handleDashboardClick = () => {
+    navigate("/Dashboard");
+  };
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -176,7 +177,7 @@ export default function FormulaireVir() {
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-teal-100 to-white p-4">
       <div className="absolute top-4 right-4">
         <button
-          onClick={() => navigate("/dashboard")}
+          onClick={handleDashboardClick}
           className="bg-teal-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-teal-600"
         >
           Dashboard
@@ -205,10 +206,6 @@ export default function FormulaireVir() {
       />
       {isCustomBoxOpen && (
         <CustomBox
-          ram={customRam}
-          cpu={customCpu}
-          onRamChange={setCustomRam}
-          onCpuChange={setCustomCpu}
           onClose={() => setIsCustomBoxOpen(false)}
           onAddBox={handleAddCustomBox}
         />

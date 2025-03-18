@@ -13,11 +13,20 @@ import traceback
 import random
 import shutil
 import platform
+import glob
 import smtplib
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 import tempfile
 
 app = Flask(__name__)
 CORS(app)
+NODE_MAPPING = {
+    "192.168.1.5": "serveur1",
+    "192.168.1.100": "serveur",
+}
+
 
 # Fonction de connexion à Proxmox
 def connect_to_proxmox(proxmoxIp, username, password):
@@ -36,6 +45,31 @@ def connect_to_proxmox(proxmoxIp, username, password):
     else:
         raise Exception("Échec de la connexion avec Proxmox: " + response.text)
     #################################################################################################################################
+@app.route("/add_server", methods=["POST"])
+def add_server():
+    # Récupérer les données envoyées par le frontend
+    data = request.get_json()
+    proxmox_ip = data.get("serverIp")
+    node = data.get("node")
+    user = data.get("user")
+    password = data.get("password")
+
+    # Exemple d'URL pour l'API Proxmox, à adapter selon ton cas
+    proxmox_url = f"https://{proxmox_ip}:8006/api2/json/nodes/{node}/status"
+
+    # Authentification avec l'API Proxmox
+    auth = (user, password)
+
+    # Essayer de récupérer l'état du serveur ou effectuer une autre action via l'API
+    try:
+        response = requests.get(proxmox_url, auth=auth, verify=False)  # verify=False pour ignorer SSL (à ne pas faire en production)
+        if response.status_code == 200:
+            return jsonify({"status": "success", "message": "Serveur ajouté avec succès"})
+        else:
+            return jsonify({"status": "error", "message": "Erreur avec l'API Proxmox"}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
     #################################################################################################################################
     # Fonction pour récupérer la RAM totale
 @app.route('/get_limits', methods=['GET'])
@@ -56,6 +90,122 @@ def get_limits():
         return jsonify({"error": str(e)})
 
 #################################################################################################################################
+
+@app.route('/clone_template', methods=['POST'])
+def clone_template():
+    try:
+        print(f"Utilisateur en cours d'exécution : {os.getpid()}")
+        print("[INFO] Requête reçue pour le clonage...")
+
+        # Récupération des données du formulaire
+        data = request.get_json()
+        source_proxmox_ip = data.get('sourceProxmoxIp')
+        target_proxmox_ip = data.get('targetProxmoxIp')
+        template_id = data.get('template_id')
+        username = data.get('username')
+        password = data.get('password')
+        target_vm_id = data.get('target_vm_id', 9000)
+
+        if not all([source_proxmox_ip, target_proxmox_ip, template_id, username, password]):
+            return jsonify({"success": False, "message": "Tous les champs sont requis"}), 400
+
+        print(f"[INFO] Export de la VM {template_id} depuis {source_proxmox_ip}")
+        vzdump_command = f"vzdump {template_id} --dumpdir /var/lib/vz/dump --mode stop --compress zstd"
+
+        # Connexion SSH au serveur source
+        ssh_source = paramiko.SSHClient()
+        ssh_source.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh_source.connect(source_proxmox_ip, username=username, password=password)
+
+        # Exécution de la commande vzdump
+        stdin, stdout, stderr = ssh_source.exec_command(vzdump_command)
+        exit_status = stdout.channel.recv_exit_status()
+        vzdump_error = stderr.read().decode()
+
+        if exit_status != 0:
+            print(f"[ERROR] Erreur lors de l'exportation : {vzdump_error}")
+            ssh_source.close()
+            return jsonify({"success": False, "message": f"Erreur lors de l'exportation : {vzdump_error}"}), 500
+
+        print("[INFO] Export terminé, recherche du fichier généré...")
+
+        # Recherche du fichier vzdump sur le serveur Proxmox
+        vzdump_path = None
+        timeout = 30  # Attente max de 30 secondes
+        while timeout > 0:
+            vzdump_path = find_latest_vzdump(ssh_source, template_id)
+            if vzdump_path:
+                print(f"[INFO] Fichier trouvé : {vzdump_path}")
+                break
+            print(f"[ATTENTE] Fichier non trouvé, réessai dans 2 secondes...")
+            time.sleep(2)
+            timeout -= 2
+
+        if not vzdump_path:
+            print(f"[ERREUR] Aucun fichier vzdump trouvé après 30 secondes")
+            ssh_source.close()
+            return jsonify({"success": False, "message": "Aucun fichier vzdump trouvé après l'exportation !"}), 500
+
+        vzdump_filename = os.path.basename(vzdump_path)
+        print(f"[INFO] Fichier vzdump trouvé : {vzdump_filename}, début du transfert vers {target_proxmox_ip}...")
+
+        # Transfert du fichier vzdump vers le serveur cible avec scp
+        scp_command = f"scp -o StrictHostKeyChecking=no {vzdump_path} {username}@{target_proxmox_ip}:/var/lib/vz/dump/"
+        stdin, stdout, stderr = ssh_source.exec_command(scp_command)
+        output = stdout.read().decode()
+        error = stderr.read().decode()
+        print(f"[DEBUG] Sortie de scp : {output}")
+        print(f"[DEBUG] Erreurs de scp : {error}")
+        exit_status = stdout.channel.recv_exit_status()
+
+        if exit_status != 0:
+            print(f"[ERROR] Erreur lors du transfert scp : {error}")
+            ssh_source.close()
+            return jsonify({"success": False, "message": "Erreur lors du transfert scp"}), 500
+
+        print("[INFO] Transfert terminé, restauration en cours sur le serveur cible...")
+
+        # Restauration de la VM sur le serveur cible
+        ssh_target = paramiko.SSHClient()
+        ssh_target.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh_target.connect(target_proxmox_ip, username=username, password=password)
+
+        qmrestore_command = f"qmrestore /var/lib/vz/dump/{vzdump_filename} {target_vm_id}"
+        stdin, stdout, stderr = ssh_target.exec_command(qmrestore_command)
+        exit_status = stdout.channel.recv_exit_status()
+        restore_error = stderr.read().decode()
+        ssh_target.close()
+
+        if exit_status != 0:
+            print(f"[ERROR] Erreur lors de la restauration : {restore_error}")
+            return jsonify({"success": False, "message": f"Erreur lors de la restauration : {restore_error}"}), 500
+
+        print(f"[SUCCESS] Clonage réussi sur {target_proxmox_ip} avec l'ID {target_vm_id}")
+        return jsonify({"success": True, "message": f"Clonage réussi sur {target_proxmox_ip} avec l'ID {target_vm_id}"}), 200
+
+    except Exception as e:
+        print(f"[EXCEPTION] {str(e)}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+def find_latest_vzdump(ssh_client, template_id):
+    dump_dir = "/var/lib/vz/dump"
+    # Commande pour lister les fichiers correspondant au motif
+    command = f"ls -t {dump_dir}/vzdump-qemu-{template_id}-*.vma.zst 2>/dev/null | head -n 1"
+    print(f"[DEBUG] Commande exécutée : {command}")
+
+    stdin, stdout, stderr = ssh_client.exec_command(command)
+    exit_status = stdout.channel.recv_exit_status()
+    vzdump_path = stdout.read().decode().strip()
+    error_output = stderr.read().decode()
+
+    if exit_status != 0:
+        print(f"[DEBUG] Erreur lors de l'exécution de la commande : {error_output}")
+        return None
+
+    print(f"[DEBUG] Fichier trouvé : {vzdump_path}")
+    return vzdump_path if vzdump_path else None
+
 #################################################################################################################################
 @app.route('/create_vmprox', methods=['POST'])  
 def create_vmprox():
@@ -334,6 +484,50 @@ def open_console():
 
 
         #####################################################################################################
+ 
+
+@app.route('/migrate_vm', methods=['POST'])
+def migrate_vm():
+    try:
+        # Récupérer les données de la requête
+        data = request.get_json()
+        source_proxmox_ip = data.get('sourceProxmoxIp')
+        target_proxmox_ip = data.get('targetProxmoxIp')
+        vm_id = data.get('vm_id')
+        username = data.get('username')
+        password = data.get('password')
+
+        # Valider les données
+        if not all([source_proxmox_ip, target_proxmox_ip, vm_id, username, password]):
+            return jsonify({"success": False, "message": "Tous les champs sont requis"}), 400
+
+        # Récupérer le nom du nœud cible à partir de l'adresse IP
+        target_node = NODE_MAPPING.get(target_proxmox_ip)
+        if not target_node:
+            return jsonify({"success": False, "message": "Adresse IP cible non reconnue"}), 400
+
+        # Commande de migration
+        migrate_command = f"qm migrate {vm_id} {target_node} --online"
+
+        # Exécuter la commande sur le serveur source via SSH
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(source_proxmox_ip, username=username, password=password)
+
+        stdin, stdout, stderr = ssh.exec_command(migrate_command)
+        output = stdout.read().decode()
+        error = stderr.read().decode()
+
+        ssh.close()
+
+        # Vérifier si la migration a réussi
+        if "migration finished" in output:  # Adapter cette condition selon la sortie de la commande
+            return jsonify({"success": True, "message": f"VM {vm_id} migrée avec succès vers {target_node}"})
+        else:
+            return jsonify({"success": False, "message": f"Erreur lors de la migration : {error}"}), 500
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Erreur lors de la migration : {str(e)}"}), 500
         #####################################################################################################
         #####################################################################################################
                 ####################################################################################################

@@ -6,8 +6,7 @@ export default function ClusterFormVir() {
   const location = useLocation();
   const navigate = useNavigate();
   const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
-  const [customRam, setCustomRam] = useState(4);
-  const [customCpu, setCustomCpu] = useState(2);
+  const [clusterAttempts, setClusterAttempts] = useState([]); // État pour stocker les tentatives
 const [customBoxes, setCustomBoxes] = useState(() => {
     // Récupérer les boxes personnalisées depuis localStorage
     const savedBoxes = localStorage.getItem("customBoxes");
@@ -74,15 +73,18 @@ const [customBoxes, setCustomBoxes] = useState(() => {
     isNamenodeStandby: false,
     isResourceManagerStandby: false,
   });
-
+  const handleDashboardClick = () => {
+    navigate("/ClusterDashVir");
+  };
 
   
   const handleSubmit = (e) => {
     e.preventDefault();
-
+  
     if (currentNode < nodeCount - 1) {
       // Passer au formulaire du nœud suivant
       setCurrentNode(currentNode + 1);
+      // Réinitialiser les détails du nœud suivant
       setNodeDetails((prev) => {
         const updatedDetails = [...prev];
         updatedDetails[currentNode + 1] = {
@@ -102,45 +104,51 @@ const [customBoxes, setCustomBoxes] = useState(() => {
         clusterName,
         clusterDescription,
         clusterIp,
+        gateway,
         nodeCount,
         clusterType,
-        gateway, // passerelle
-        nameservers: nameservers.split(",").map((ns) => ns.trim()),
         nodeDetails,
-        haComponents,
         customBoxes,
+        nodeDetails: nodeDetails.map((node) => ({
+          ...node,
+          haComponents: isHaSelected ? haComponents : null, // Inclure les composants HA si le cluster est de type HA
+        })),
       };
+      // Enregistrer l'essai dans localStorage (premier enregistrement)
+  const savedAttempts = JSON.parse(localStorage.getItem("clusterAttempts")) || [];
+  savedAttempts.push(clusterData);
+  localStorage.setItem("clusterAttempts", JSON.stringify(savedAttempts));
 
-      fetch("http://localhost:5000/create_cluster", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(clusterData),
-      })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error("Erreur lors de la création du cluster");
-          }
-          return response.json();
-        })
-        .then((data) => {
-          console.log("Cluster créé:", data);
-          // Rediriger vers le dashboard ou afficher un message de succès
-          navigate("/ClusterDashVir", { state: data });
-        })
-        .catch((error) => {
-          console.error("Erreur:", error);
-          // Vous pouvez afficher un message d'erreur ici
-        });
-    }
+  // Envoyer les données au serveur (optionnel)
+  fetch("http://localhost:5000/create_cluster", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(clusterData),
+  })
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error("Erreur lors de la création du cluster");
+      }
+      return response.json();
+    })
+    .then((data) => {
+      console.log("Cluster créé:", data);
+      navigate("/ClusterDashVir", { state: clusterData });
+    })
+    .catch((error) => {
+      console.error("Erreur:", error);
+      navigate("/ClusterDashVir", { state: clusterData });
+    });
+};
   };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-teal-100 to-white p-4">
       <div className="absolute top-4 right-4">
         <button
-          onClick={() => navigate("/ClusterDashVir")}
+          onClick={handleDashboardClick}
           className="bg-teal-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-teal-600"
         >
           Dashboard
@@ -167,10 +175,7 @@ const [customBoxes, setCustomBoxes] = useState(() => {
         />
         {isCustomBoxOpen && (
             <CustomBox
-              ram={customRam}
-              cpu={customCpu}
-              onRamChange={setCustomRam}
-              onCpuChange={setCustomCpu}
+
               onClose={() => setIsCustomBoxOpen(false)}
               onAddBox={handleAddCustomBox} // Assurez-vous que c'est bien passé ici
             />

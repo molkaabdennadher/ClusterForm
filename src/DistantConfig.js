@@ -4,7 +4,6 @@ import { useNavigate } from 'react-router-dom';
 const DistantConfig = () => {
   const [proxmoxIp, setProxmoxIp] = useState('');
   const [nodeName, setNodeName] = useState('');
-  const [vmIp, setVmIp] = useState('');
   const [user, setUser] = useState('root'); // Champ utilisateur prédéfini sur 'root'
   const [password, setPassword] = useState('');
   const [vm_id, setVmId] = useState(''); // Ajout de l'état pour VM ID
@@ -15,7 +14,6 @@ const DistantConfig = () => {
     const vmData = {
       proxmoxIp,
       nodeName,
-      vmIp,
       user,
       password,
       vm_id
@@ -56,16 +54,6 @@ const DistantConfig = () => {
           placeholder="Enter Proxmox Node Name"
           value={nodeName}
           onChange={(e) => setNodeName(e.target.value)}
-          className="w-full p-2 border rounded mb-4"
-          required
-        />
-
-        <label className="block text-sm font-medium">VM IP:</label>
-        <input
-          type="text"
-          placeholder="Enter VM IP"
-          value={vmIp}
-          onChange={(e) => setVmIp(e.target.value)}
           className="w-full p-2 border rounded mb-4"
           required
         />
