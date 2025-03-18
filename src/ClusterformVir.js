@@ -111,7 +111,7 @@ export default function ClusterFormVir() {
   // Fonction pour soumettre le formulaire
   const handleSubmit = (e) => {
     e.preventDefault();
-
+  
     if (currentNode < nodeCount - 1) {
       setCurrentNode(currentNode + 1);
     } else {
@@ -122,13 +122,13 @@ export default function ClusterFormVir() {
         clusterType,
         nodeDetails,
         customBoxes,
-        isHaSelected
+        isHaSelected,
       };
-
+  
       const endpoint = isHaSelected
         ? "http://localhost:5000/create_cluster_ha"
         : "http://localhost:5000/create_cluster";
-
+  
       fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -140,10 +140,13 @@ export default function ClusterFormVir() {
         })
         .then((data) => {
           console.log("Cluster créé:", data);
+          // Rediriger vers le tableau de bord avec les données du cluster
           navigate("/ClusterDashVir", { state: data });
         })
         .catch((error) => {
           console.error("Erreur:", error);
+          // Afficher un message d'erreur à l'utilisateur
+          alert("Une erreur s'est produite lors de la création du cluster.");
         });
     }
   };

@@ -18,45 +18,34 @@ const ClusterVir = () => {
       ...prev,
       [name]: checked,
     }));
+    // Mettez à jour isHaSelected en fonction du type de cluster
     if (name === "Ha") {
       setIsHaSelected(checked);
     }
   };
+ 
 
   const [isHaSelected, setIsHaSelected] = useState(false);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
 
+    // Préparer les données globales du cluster
     const clusterData = {
       clusterName,
       clusterDescription,
       nodeCount,
       clusterType,
-      isHaSelected,
-      nodeDetails: [], // À compléter dans l'étape suivante
+      isHaSelected, // sous forme de chaîne, transformation dans l'étape suivante
+
+      nodeDetails: [], // à compléter dans l'étape suivante
+
     };
 
-    try {
-      const response = await fetch("/create_cluster", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(clusterData),
-      });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        // Rediriger vers le tableau de bord après la création du cluster
-        navigate("/ClusterDashVir", { state: data });
-      } else {
-        console.error("Error creating cluster:", data.error);
-      }
-    } catch (error) {
-      console.error("Error:", error);
-    }
+    // On passe ces données vers la page de configuration des nœuds
+    navigate("/ClusterformVir", {
+      state: clusterData,
+    });
   };
 
   const handleDashboardClick = () => {
