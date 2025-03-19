@@ -40,9 +40,9 @@ export default function ClusterFormVir() {
       isResourceManager: true,
       isResourceManagerStandby: false,
       isDataNode: true,
-      isNodeManager: false,
-      isZookeeper: false,
-      isJournalNode: false
+      isNodeManager: true,
+      isZookeeper: true,
+      isJournalNode: true
     },
     {
       hostname: "ayoub16",
@@ -56,7 +56,7 @@ export default function ClusterFormVir() {
       isResourceManager: false,
       isResourceManagerStandby: true,
       isDataNode: true,
-      isNodeManager: false,
+      isNodeManager: true,
       isZookeeper: true,
       isJournalNode: true
     },
@@ -72,9 +72,9 @@ export default function ClusterFormVir() {
       isResourceManager: false,
       isResourceManagerStandby: false,
       isDataNode: true,
-      isNodeManager: false,
-      isZookeeper: false,
-      isJournalNode: false
+      isNodeManager: true,
+      isZookeeper: true,
+      isJournalNode: true
     }
   ]);
 
