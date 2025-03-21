@@ -1453,37 +1453,35 @@ def create_cluster_ha():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error configuring SSH", "details": str(e)}), 500
 
-    # 5. Installation de ZooKeeper sur le NameNode
-    # On suppose qu’on a déjà un nameNode_hostname
-    nameNode_hostname = get_nameNode_hostname(cluster_data)  
+# 5. Installation de ZooKeeper sur le NameNode (version corrigée pour respecter la structure souhaitée)
+    nameNode_hostname = get_nameNode_hostname(cluster_data)
+
+    """
+    Installe ZooKeeper sur le NameNode :
+      - Télécharge l'archive de ZooKeeper
+      - Extrait l'archive dans /etc/zookeeper en supprimant les composants inutiles
+      - Copie le fichier de configuration d'exemple (zoo_sample.cfg) en zoo.cfg
+      - Crée les dossiers de données (/var/lib/zookeeper) et logs (/var/log/zookeeper)
+      - Ajuste les droits et crée une archive compressée pour le transfert
+    """
     try:
-        # Vérifier si l'archive ZooKeeper existe déjà dans /vagrant/zookeeper.tar.gz
-        check_zk_archive_cmd = f'vagrant ssh {nameNode_hostname} -c "test -f /vagrant/zookeeper.tar.gz"'
-        result = subprocess.run(check_zk_archive_cmd, shell=True, cwd=cluster_folder)
-        if result.returncode != 0:
-            # L'archive n'existe pas : installer ZooKeeper sur le NameNode
-            install_zk_cmd = (
-                f'vagrant ssh {nameNode_hostname} -c "sudo apt-get update && '
-                f'sudo apt-get install -y zookeeperd"'
-            )
-            subprocess.run(install_zk_cmd, shell=True, cwd=cluster_folder, check=True)
-
-            # Archiver l'installation de ZooKeeper
-            # On suppose que zookeeperd installe la config dans /etc/zookeeper
-            # et les binaires dans /usr/share/zookeeper
-            tar_zk_cmd = f'vagrant ssh {nameNode_hostname} -c "sudo tar -czf /tmp/zookeeper.tar.gz -C /etc zookeeper"'
-            subprocess.run(tar_zk_cmd, shell=True, cwd=cluster_folder, check=True)
-
-            # Copier l'archive dans /vagrant
-            copy_zk_cmd = f'vagrant ssh {nameNode_hostname} -c "sudo cp /tmp/zookeeper.tar.gz /vagrant/zookeeper.tar.gz"'
-            subprocess.run(copy_zk_cmd, shell=True, cwd=cluster_folder, check=True)
-        else:
-            print("L'archive ZooKeeper existe déjà dans /vagrant/zookeeper.tar.gz. Extraction sur le NameNode.")
-            extract_zk_cmd = f'vagrant ssh {nameNode_hostname} -c "sudo rm -rf /etc/zookeeper && sudo tar -xzf /vagrant/zookeeper.tar.gz -C /etc"'
-            subprocess.run(extract_zk_cmd, shell=True, cwd=cluster_folder, check=True)
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": "Error installing ZooKeeper on NameNode", "details": str(e)}), 500
+        prepare_cmd = (
+            f'vagrant ssh {nameNode_hostname} -c "'
+            'sudo apt-get update && '
+            'sudo apt-get install -y wget && '
+            'wget -O /tmp/zookeeper.tar.gz https://archive.apache.org/dist/zookeeper/zookeeper-3.6.3/apache-zookeeper-3.6.3-bin.tar.gz && '
+            'sudo mkdir -p /etc/zookeeper && '
+            'sudo tar -xzf /tmp/zookeeper.tar.gz -C /etc/zookeeper --strip-components=1 && '
+            'sudo cp /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg && '
+            'sudo mkdir -p /var/lib/zookeeper /var/log/zookeeper && '
+            'sudo chown -R vagrant:vagrant /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && '
+            'sudo tar -czf /tmp/zookeeper_etc.tar.gz -C /etc zookeeper"'
+        )
+        subprocess.run(prepare_cmd, shell=True, cwd=cluster_folder, check=True)
+        print("Installation sur le NameNode réussie")
     
+    except subprocess.CalledProcessError as e:
+        print(f"Erreur d'installation ZooKeeper sur NameNode: {str(e)}")
 # 6. Installation de Hadoop sur le primary NameNode et synchronisation de l'archive dans /vagrant
     try:
         primary_namenode = get_nameNode_hostname(cluster_data)
@@ -1530,25 +1528,58 @@ def create_cluster_ha():
                     "details": str(e)
                 }), 500
 # 7. Transférer l’archive ZooKeeper aux autres nœuds (si besoin)
-    # On identifie les nœuds qui doivent avoir ZooKeeper. Par exemple, s’ils ont isZookeeper = True
-    for node in cluster_data["nodeDetails"]:
+        """
+    Transfère l'archive compressée du NameNode vers les nœuds ZooKeeper :
+      - Utilise SCP pour copier l'archive depuis le NameNode vers /tmp sur le nœud cible
+      - Sur le nœud cible, supprime l'ancien dossier /etc/zookeeper et extrait l'archive dans /etc
+      - Crée les dossiers de données et logs et ajuste les permissions
+    """
+    for node in cluster_data.get("nodeDetails", []):
         if node.get("isZookeeper", False):
-            target_hostname = node["hostname"]
-            if target_hostname != nameNode_hostname:
+            target_hostname = node.get("hostname")
+            if target_hostname and target_hostname != nameNode_hostname:
                 try:
-                    # Extraire l’archive sur le nœud
-                    copy_extract_cmd = (
-                        f'vagrant ssh {target_hostname} -c "sudo apt-get update && '
-                        f'sudo apt-get install -y openssh-client && '
-                        f'sudo rm -rf /etc/zookeeper && '
-                        f'sudo tar -xzf /vagrant/zookeeper.tar.gz -C /etc"'
+                    # Transfert via SCP depuis le NameNode
+                    scp_cmd = (
+                        f'vagrant ssh {nameNode_hostname} -c "'
+                        f'scp /tmp/zookeeper_etc.tar.gz {target_hostname}:/tmp/"'
                     )
-                    subprocess.run(copy_extract_cmd, shell=True, cwd=cluster_folder, check=True)
+                    subprocess.run(scp_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                    # Extraction sur le nœud cible
+                    install_cmd = (
+                        f'vagrant ssh {target_hostname} -c "'
+                        'sudo rm -rf /etc/zookeeper && '
+                        'sudo tar -xzf /tmp/zookeeper_etc.tar.gz -C /etc && '
+                        'sudo mkdir -p /var/lib/zookeeper /var/log/zookeeper && '
+                        'sudo chown -R vagrant:vagrant /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper"'
+                    )
+                    subprocess.run(install_cmd, shell=True, cwd=cluster_folder, check=True)
+                    
+                    print(f"Transfert réussi sur {target_hostname}")
+                
                 except subprocess.CalledProcessError as e:
-                    return jsonify({
-                        "error": f"Error copying/extracting ZooKeeper on node {target_hostname}",
-                        "details": str(e)
-                    }), 500
+                    print(f"Erreur sur {target_hostname}: {str(e)}")
+
+    """
+    Configure le fichier /var/lib/zookeeper/myid pour chaque nœud ZooKeeper :
+      - Pour chaque nœud identifié comme ZooKeeper, écrit l'ID (zookeeperId) dans le fichier myid
+    """
+    for node in cluster_data.get("nodeDetails", []):
+        if node.get("isZookeeper", False):
+            hostname = node.get("hostname")
+            server_id = node.get("zookeeperId")
+            if hostname and server_id:
+                try:
+                    configure_cmd = (
+                        f'vagrant ssh {hostname} -c "'
+                        f'echo {server_id} | sudo tee /var/lib/zookeeper/myid"'
+                    )
+                    subprocess.run(configure_cmd, shell=True, cwd=cluster_folder, check=True)
+                    print(f"Configuration myid réussie sur {hostname}")
+                except subprocess.CalledProcessError as e:
+                    print(f"Erreur de configuration myid sur {hostname}: {str(e)}")
+
 # 8. Installer Java, net-tools, python3 et configurer l'environnement sur tous les nœuds
     for node in cluster_data.get("nodeDetails", []):
         target_hostname = node.get("hostname")
@@ -1571,6 +1602,8 @@ def create_cluster_ha():
                 f'vagrant ssh {target_hostname} -c "echo \'export ZOOKEEPER_HOME=/etc/zookeeper\' >> ~/.bashrc && '
                 f'echo \'export PATH=$PATH:$ZOOKEEPER_HOME/bin\' >> ~/.bashrc && '
                 f'echo \'export ZOO_LOG_DIR=/var/log/zookeeper\' >> ~/.bashrc"'
+                
+
             )
             subprocess.run(configure_env_cmd2, shell=True, cwd=cluster_folder, check=True)
 
@@ -1582,218 +1615,221 @@ def create_cluster_ha():
         except subprocess.CalledProcessError as e:
             return jsonify({"error": f"Error configuring environment on node {target_hostname}", "details": str(e)}), 500
 
-# 10. Création des playbooks Ansible pour la configuration HA Hadoop
+# On suppose que les variables cluster_folder, hadoop_home, java_home, cluster_data, etc. sont définies
+
+##############################################
+# Création des fichiers de configuration et playbooks HA
+##############################################
     templates_dir = os.path.join(cluster_folder, "templates")
     os.makedirs(templates_dir, exist_ok=True)
 
-    # ---------------------------
-    # Template core-site.xml HA
-    # ---------------------------
-    core_site_template = """<configuration>
-    <property>
-        <name>fs.defaultFS</name>
-        <value>hdfs://ha-cluster:9000</value>
-    </property>
-    <!-- Ajoutez d'autres paramètres spécifiques à HA si nécessaire -->
-    </configuration>
-    """
+    # ---- Template core-site.xml.j2 ----
+    core_site_template = textwrap.dedent("""\
+        <configuration>
+        <!-- Point d'entrée HDFS (doit correspondre au nameservice défini dans hdfs-site.xml) -->
+        <property>
+            <name>fs.defaultFS</name>
+            <value>hdfs://ha-cluster</value>
+        </property>
+        <!-- Proxy de failover pour le client HDFS -->
+        <property>
+            <name>dfs.client.failover.proxy.provider.ha-cluster</name>
+            <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>
+        </property>
+        <!-- Quorum ZooKeeper pour le failover -->
+        <property>
+            <name>ha.zookeeper.quorum</name>
+            <value>{% for zk in groups['zookeeper'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>
+        </property>
+        <!-- Autres paramètres utiles -->
+        <property>
+            <name>dfs.permissions.enabled</name>
+            <value>true</value>
+        </property>
+        <property>
+            <name>ipc.client.connect.max.retries</name>
+            <value>3</value>
+        </property>
+        </configuration>
+        """)
     with open(os.path.join(templates_dir, "core-site.xml.j2"), "w", encoding="utf-8") as f:
         f.write(core_site_template)
 
-    # ----------------------------
-    # Template hdfs-site.xml HA
-    # Version enrichie avec toutes les configurations nécessaires
-    # ----------------------------
-    hdfs_site_template = """<configuration>
-    <!-- Réplication des blocs -->
-    <property>
-        <name>dfs.replication</name>
-        <value>2</value>
-    </property>
-
-    <!-- Activer le mode HA pour le cluster -->
-    <property>
-        <name>dfs.nameservices</name>
-        <value>ha-cluster</value>
-    </property>
-
-    <!-- Définir les deux NameNodes -->
-    <property>
-        <name>dfs.ha.namenodes.ha-cluster</name>
-        <value>{{ groups['namenode'][0] }},{{ groups['namenode_standby'][0] }}</value>
-    </property>
-
-    <!-- Configurer les adresses des NameNodes -->
-    <property>
-        <name>dfs.namenode.rpc-address.ha-cluster.namenode1</name>
-        <value>{{ groups['namenode'][0] }}:8020</value>
-    </property>
-    <property>
-        <name>dfs.namenode.rpc-address.ha-cluster.namenode2</name>
-        <value>{{ groups['namenode_standby'][0] }}:8020</value>
-    </property>
-    <property>
-        <name>dfs.namenode.http-address.ha-cluster.namenode1</name>
-        <value>{{ groups['namenode'][0] }}:50070</value>
-    </property>
-    <property>
-        <name>dfs.namenode.http-address.ha-cluster.namenode2</name>
-        <value>{{ groups['namenode_standby'][0] }}:50070</value>
-    </property>
-
-    <!-- Répertoire partagé pour les éditions -->
-    <property>
-        <name>dfs.namenode.shared.edits.dir</name>
-        <value>qjournal://{% for jn in groups['journalnode'] %}{{ hostvars[jn].ansible_host }}:8485{% if not loop.last %};{% endif %}{% endfor %}/ha-cluster</value>
-    </property>
-
-    <!-- Activer la bascule automatique -->
-    <property>
-        <name>dfs.ha.automatic-failover.enabled</name>
-        <value>true</value>
-    </property>
-
-    <!-- Ajouter le fournisseur de proxy pour la bascule automatique -->
-    <property>
-        <name>dfs.client.failover.proxy.provider.ha-cluster</name>
-        <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>
-    </property>
-
-    <!-- Configurer le quorum Zookeeper -->
-    <property>
-        <name>ha.zookeeper.quorum</name>
-        <value>{% for zk in groups['zookeeper'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>
-    </property>
-
-    <!-- Répertoires locaux -->
-    <property>
-        <name>dfs.namenode.name.dir</name>
-        <value>file:{{ hadoop_home }}/data/hdfs/namenode</value>
-    </property>
-    <property>
-        <name>dfs.datanode.data.dir</name>
-        <value>file:{{ hadoop_home }}/data/hdfs/datanode</value>
-    </property>
-    <property>
-        <name>dfs.namenode.checkpoint.dir</name>
-        <value>file:{{ hadoop_home }}/data/hdfs/namesecondary</value>
-    </property>
-
-    <!-- Configuration de fencing pour éviter les conflits -->
-    <property>
-        <name>dfs.ha.fencing.methods</name>
-        <value>shell(/bin/true)</value>
-    </property>
-
-    <!-- Timeout pour le failover -->
-    <property>
-        <name>dfs.ha.failover-controller.active-standby-elector.zk.op.retries</name>
-        <value>3</value>
-    </property>
-    </configuration>
-    """
+    # ---- Template hdfs-site.xml.j2 ----
+    # On utilise ici les noms de machines tels qu'ils apparaissent dans l'inventaire (ex: ayoub12, ayoub16)
+    hdfs_site_template = textwrap.dedent("""\
+        <configuration>
+        <!-- Réplication -->
+        <property>
+            <name>dfs.replication</name>
+            <value>2</value>
+        </property>
+        <!-- Activation du mode HA -->
+        <property>
+            <name>dfs.nameservices</name>
+            <value>ha-cluster</value>
+        </property>
+        <!-- Définir les deux NameNodes (utiliser les noms de machines de l'inventaire) -->
+        <property>
+            <name>dfs.ha.namenodes.ha-cluster</name>
+            <value>{{ groups['namenode'][0] }},{{ groups['namenode_standby'][0] }}</value>
+        </property>
+        <!-- Adresses RPC et HTTP en se basant sur les noms de machines -->
+        <property>
+            <name>dfs.namenode.rpc-address.ha-cluster.{{ groups['namenode'][0] }}</name>
+            <value>{{ hostvars[groups['namenode'][0]].ansible_host }}:8020</value>
+        </property>
+        <property>
+            <name>dfs.namenode.rpc-address.ha-cluster.{{ groups['namenode_standby'][0] }}</name>
+            <value>{{ hostvars[groups['namenode_standby'][0]].ansible_host }}:8020</value>
+        </property>
+        <property>
+            <name>dfs.namenode.http-address.ha-cluster.{{ groups['namenode'][0] }}</name>
+            <value>{{ hostvars[groups['namenode'][0]].ansible_host }}:50070</value>
+        </property>
+        <property>
+            <name>dfs.namenode.http-address.ha-cluster.{{ groups['namenode_standby'][0] }}</name>
+            <value>{{ hostvars[groups['namenode_standby'][0]].ansible_host }}:50070</value>
+        </property>
+        <!-- Répertoire partagé pour les shared edits -->
+        <property>
+            <name>dfs.namenode.shared.edits.dir</name>
+            <value>qjournal://{% for jn in groups['journalnode'] %}{{ hostvars[jn].ansible_host }}:8485{% if not loop.last %};{% endif %}{% endfor %}/ha-cluster</value>
+        </property>
+        <!-- Bascule automatique -->
+        <property>
+            <name>dfs.ha.automatic-failover.enabled</name>
+            <value>true</value>
+        </property>
+        <!-- Proxy failover (idem core-site) -->
+        <property>
+            <name>dfs.client.failover.proxy.provider.ha-cluster</name>
+            <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>
+        </property>
+        <!-- Quorum ZooKeeper -->
+        <property>
+            <name>ha.zookeeper.quorum</name>
+            <value>{% for zk in groups['zookeeper'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>
+        </property>
+        <!-- Répertoires locaux -->
+        <property>
+            <name>dfs.namenode.name.dir</name>
+            <value>file:{{ hadoop_home }}/data/hdfs/namenode</value>
+        </property>
+        <property>
+            <name>dfs.datanode.data.dir</name>
+            <value>file:{{ hadoop_home }}/data/hdfs/datanode</value>
+        </property>
+        <property>
+            <name>dfs.namenode.checkpoint.dir</name>
+            <value>file:{{ hadoop_home }}/data/hdfs/namesecondary</value>
+        </property>
+        <!-- Fencing et timeout -->
+        <property>
+            <name>dfs.ha.fencing.methods</name>
+            <value>shell(/bin/true)</value>
+        </property>
+        <property>
+            <name>dfs.ha.failover-controller.active-standby-elector.zk.op.retries</name>
+            <value>3</value>
+        </property>
+        </configuration>
+        """)
     with open(os.path.join(templates_dir, "hdfs-site.xml.j2"), "w", encoding="utf-8") as f:
         f.write(hdfs_site_template)
 
-    # -----------------------------
-    # Template yarn-site.xml HA (corrigé et enrichi)
-    # -----------------------------
-    yarn_site_template = """<configuration>
-    <property>
-        <name>yarn.resourcemanager.ha.enabled</name>
-        <value>true</value>
-    </property>
-    <property>
-        <name>yarn.resourcemanager.cluster-id</name>
-        <value>yarn-cluster</value>
-    </property>
-    <property>
-        <name>yarn.resourcemanager.ha.rm-ids</name>
-        <value>{{ groups['resourcemanager'][0] }},{{ groups['resourcemanager_standby'][0] }}</value>
-    </property>
-    <property>
-        <name>yarn.resourcemanager.hostname.rm1</name>
-        <value>{{ groups['resourcemanager'][0] }}</value>
-    </property>
-    <property>
-        <name>yarn.resourcemanager.hostname.rm2</name>
-        <value>{{ groups['resourcemanager_standby'][0] }}</value>
-    </property>
-    <!-- Paramètres supplémentaires pour YARN HA -->
-    <property>
-        <name>yarn.resourcemanager.webapp.address.rm1</name>
-        <value>{{ groups['resourcemanager'][0] }}:8088</value>
-    </property>
-    <property>
-        <name>yarn.resourcemanager.webapp.address.rm2</name>
-        <value>{{ groups['resourcemanager_standby'][0] }}:8088</value>
-    </property>
-    </configuration>
-    """
+    # ---- Template yarn-site.xml.j2 ----
+    yarn_site_template = textwrap.dedent("""\
+        <configuration>
+        <property>
+            <name>yarn.resourcemanager.ha.enabled</name>
+            <value>true</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.cluster-id</name>
+            <value>yarn-cluster</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.ha.rm-ids</name>
+            <value>{{ groups['resourcemanager'][0] }},{{ groups['resourcemanager_standby'][0] }}</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.hostname.rm1</name>
+            <value>{{ groups['resourcemanager'][0] }}</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.hostname.rm2</name>
+            <value>{{ groups['resourcemanager_standby'][0] }}</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.webapp.address.rm1</name>
+            <value>{{ groups['resourcemanager'][0] }}:8088</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.webapp.address.rm2</name>
+            <value>{{ groups['resourcemanager_standby'][0] }}:8088</value>
+        </property>
+        </configuration>
+        """)
     with open(os.path.join(templates_dir, "yarn-site.xml.j2"), "w", encoding="utf-8") as f:
         f.write(yarn_site_template)
 
-    # -----------------------------
-    # Template mapred-site.xml
-    # -----------------------------
-    mapred_site_template = """<configuration>
-    <property>
-        <name>mapreduce.framework.name</name>
-        <value>yarn</value>
-    </property>
-    <!-- Ajoutez d'autres paramètres MapReduce si nécessaire -->
-    </configuration>
-    """
+    # ---- Template mapred-site.xml.j2 ----
+    mapred_site_template = textwrap.dedent("""\
+        <configuration>
+        <property>
+            <name>mapreduce.framework.name</name>
+            <value>yarn</value>
+        </property>
+        </configuration>
+        """)
     with open(os.path.join(templates_dir, "mapred-site.xml.j2"), "w", encoding="utf-8") as f:
         f.write(mapred_site_template)
 
-    # -----------------------------
-    # Template masters (active NameNode)
-    # -----------------------------
-    masters_template = """{{ groups['namenode'][0] }}
-    """
+    # ---- Template masters.j2 ----
+    masters_template = textwrap.dedent("""\
+        {{ groups['namenode'][0] }}
+        """)
     with open(os.path.join(templates_dir, "masters.j2"), "w", encoding="utf-8") as f:
         f.write(masters_template)
 
-    # -----------------------------
-    # Template workers (DataNodes)
-    # -----------------------------
-    workers_template = """{% for worker in groups['datanodes'] %}
-    {{ worker }}
-    {% endfor %}
-    """
+    # ---- Template workers.j2 ----
+    workers_template = textwrap.dedent("""\
+        {% for worker in groups['datanodes'] %}
+        {{ worker }}
+        {% endfor %}
+        """)
     with open(os.path.join(templates_dir, "workers.j2"), "w", encoding="utf-8") as f:
         f.write(workers_template)
 
-    # -----------------------------
-    # Template zoo.cfg pour ZooKeeper
-    # -----------------------------
-    zoo_cfg_template = """tickTime=2000
-    initLimit=10
-    syncLimit=5
-    dataDir={{ hadoop_home }}/data/zookeeper
-    clientPort=2181
-    {% for zk in groups['zookeeper'] %}
-    server.{{ loop.index }}={{ hostvars[zk].ansible_host }}:2888:3888
-    {% endfor %}
-    """
+    # ---- Template zoo.cfg.j2 ----
+    # Déployé dans le répertoire standard de ZooKeeper (/etc/zookeeper/conf)
+    zoo_cfg_template = textwrap.dedent("""\
+        tickTime=2000
+        initLimit=10
+        syncLimit=5
+        dataDir=/var/lib/zookeeper
+        clientPort=2181
+        {% for zk in groups['zookeeper'] %}
+        server.{{ loop.index }}={{ hostvars[zk].ansible_host }}:2888:3888
+        {% endfor %}
+        """)
     with open(os.path.join(templates_dir, "zoo.cfg.j2"), "w", encoding="utf-8") as f:
         f.write(zoo_cfg_template)
 
-    # -----------------------------
-    # Template hosts.j2 (pour /etc/hosts)
-    # -----------------------------
-    hosts_template = """# ANSIBLE GENERATED HOSTS FILE
-    {% for host in groups['all'] %}
-    {{ hostvars[host].ansible_host }} {{ host }}
-    {% endfor %}
-    """
+    # ---- Template hosts.j2 ----
+    hosts_template = textwrap.dedent("""\
+        # ANSIBLE GENERATED HOSTS FILE
+        {% for host in groups['all'] %}
+        {{ hostvars[host].ansible_host }} {{ host }}
+        {% endfor %}
+        """)
     with open(os.path.join(templates_dir, "hosts.j2"), "w", encoding="utf-8") as f:
         f.write(hosts_template)
 
-    # -----------------------------
-    # Création du playbook de configuration HA Hadoop
-    # -----------------------------
+    ######################################################################
+    # Création du playbook de configuration HA Hadoop (hadoop_config.yml)
+    ######################################################################
     hadoop_config_playbook = textwrap.dedent("""\
 ---
 - name: Configurer HA Hadoop et mettre à jour /etc/hosts
@@ -1835,13 +1871,13 @@ def create_cluster_ha():
     - name: Déployer zoo.cfg pour ZooKeeper
       template:
         src: templates/zoo.cfg.j2
-        dest: "{{ hadoop_home }}/etc/hadoop/zoo.cfg"
+        dest: "/etc/zookeeper/conf/zoo.cfg"
 
     - name: Mettre à jour /etc/hosts avec les hôtes du cluster
       template:
         src: templates/hosts.j2
         dest: /etc/hosts
-""")
+        """)
     hadoop_config_playbook_path = os.path.join(cluster_folder, "hadoop_config.yml")
     try:
         with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
@@ -1849,53 +1885,76 @@ def create_cluster_ha():
     except Exception as e:
         return jsonify({"error": "Error writing HA config playbook", "details": str(e)}), 500
 
-    # -----------------------------
-    # Création du playbook de démarrage HA Hadoop
-    # -----------------------------
+    ############################################################################
+    # Création du playbook de démarrage HA Hadoop (hadoop_start_services.yml)
+    #############################################################################
+    # Ordre important : démarrer ZooKeeper et JournalNodes avant le formatage du NameNode, 
+    # puis initialiser HA dans ZooKeeper, formater le NameNode, et enfin démarrer HDFS/YARN.
     hadoop_start_playbook = textwrap.dedent("""\
 ---
-- name: Démarrer les services HDFS sur les NameNodes (actif et standby)
+- name: Démarrer ZooKeeper sur les nœuds ZooKeeper
+  hosts: zookeeper
+  become: yes
+  tasks:
+    - name: Démarrer ZooKeeper
+      shell: "/usr/bin/zkServer.sh start"
+      become_user: vagrant
+      environment:
+          ZOO_LOG_DIR: "/var/log/zookeeper"
+          ZOO_CONF_DIR: "/etc/zookeeper/conf"
+      executable: /bin/bash
+
+- name: Démarrer le JournalNode sur les nœuds ZooKeeper
+  hosts: zookeeper
+  become: yes
+  tasks:
+    - name: Démarrer le JournalNode
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start journalnode"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash
+
+- name: Initialiser le HA dans ZooKeeper (uniquement sur le NameNode actif)
   hosts: namenode
   become: yes
   tasks:
-    - name: Mettre à jour hadoop-env.sh pour définir JAVA_HOME
-      shell: |
-        if grep -q '^export JAVA_HOME=' {{ hadoop_home }}/etc/hadoop/hadoop-env.sh; then
-          sed -i 's|^export JAVA_HOME=.*|export JAVA_HOME={{ java_home }}|' {{ hadoop_home }}/etc/hadoop/hadoop-env.sh;
-        else
-          echo 'export JAVA_HOME={{ java_home }}' >> {{ hadoop_home }}/etc/hadoop/hadoop-env.sh;
-        fi
-      args:
-        executable: /bin/bash
-
-    - name: Créer le répertoire de logs
-      file:
-        path: "{{ hadoop_home }}/logs"
-        state: directory
-        owner: vagrant
-        group: vagrant
-        mode: '0755'
-
-    - name: Formater le NameNode (si nécessaire)
-      shell: "{{ hadoop_home }}/bin/hdfs --config {{ hadoop_home }}/etc/hadoop namenode -format -force -nonInteractive"
-      args:
-        creates: "/var/hadoop/hdfs/namenode/current/VERSION"
+    - name: Initialiser HA dans ZooKeeper
+      shell: "{{ hadoop_home }}/bin/hdfs zkfc -formatZK -force -nonInteractive"
       become_user: vagrant
       environment:
-        JAVA_HOME: "{{ java_home }}"
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash
+      when: inventory_hostname == groups['namenode'][0]
+
+- name: Formater le NameNode (si nécessaire)
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Formater le NameNode (si nécessaire)
+      shell: "{{ hadoop_home }}/bin/hdfs --config {{ hadoop_home }}/etc/hadoop namenode -format -force -clusterId ha-cluster -nonInteractive"
+      args:
+          creates: "/var/hadoop/hdfs/namenode/current/VERSION"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
       executable: /bin/bash
 
+- name: Démarrer HDFS sur les NameNodes
+  hosts: namenode
+  become: yes
+  tasks:
     - name: Démarrer HDFS
       shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
       become_user: vagrant
       environment:
-        JAVA_HOME: "{{ java_home }}"
-        HDFS_NAMENODE_USER: vagrant
-        HDFS_DATANODE_USER: vagrant
-        HDFS_SECONDARYNAMENODE_USER: vagrant
+          JAVA_HOME: "{{ java_home }}"
+          HDFS_NAMENODE_USER: vagrant
+          HDFS_DATANODE_USER: vagrant
+          HDFS_SECONDARYNAMENODE_USER: vagrant
       executable: /bin/bash
 
-- name: Démarrer les services YARN sur les ResourceManagers (actif et standby)
+- name: Démarrer YARN sur les ResourceManagers
   hosts: resourcemanager
   become: yes
   tasks:
@@ -1903,21 +1962,21 @@ def create_cluster_ha():
       shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
       become_user: vagrant
       environment:
-        JAVA_HOME: "{{ java_home }}"
-      executable: /bin/bash
-
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      
     - name: Démarrer explicitement le ResourceManager en arrière-plan
       shell: "nohup {{ hadoop_home }}/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
       become_user: vagrant
       environment:
-        JAVA_HOME: "{{ java_home }}"
+          JAVA_HOME: "{{ java_home }}"
       executable: /bin/bash
 
-    - name: Pause pour permettre au ResourceManager de démarrer
+    - name: Pause pour démarrage du ResourceManager
       pause:
-        seconds: 20
+          seconds: 20
 
-- name: Démarrer le NodeManager sur les DataNodes (NodeManagers)
+- name: Démarrer le NodeManager sur les DataNodes
   hosts: nodemanagers
   become: yes
   tasks:
@@ -1925,26 +1984,7 @@ def create_cluster_ha():
       shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start nodemanager"
       become_user: vagrant
       environment:
-        JAVA_HOME: "{{ java_home }}"
-      executable: /bin/bash
-
-- name: Démarrer ZooKeeper et JournalNodes sur les nœuds ZooKeeper
-  hosts: zookeeper
-  become: yes
-  tasks:
-    - name: Démarrer ZooKeeper
-      shell: "zkServer.sh start"
-      become_user: vagrant
-      environment:
-        ZOO_LOG_DIR: "/var/log/zookeeper"
-        ZOO_CONF_DIR: "/etc/zookeeper/conf"
-      executable: /bin/bash
-
-    - name: Démarrer le JournalNode (sur le même nœud que ZooKeeper)
-      shell: "{{ hadoop_home }}/bin/hdfs --daemon start journalnode"
-      become_user: vagrant
-      environment:
-        JAVA_HOME: "{{ java_home }}"
+          JAVA_HOME: "{{ java_home }}"
       executable: /bin/bash
 
 - name: Vérifier les services Hadoop (jps)
@@ -1959,8 +1999,8 @@ def create_cluster_ha():
 
     - name: Afficher la sortie de jps
       debug:
-        var: jps_output.stdout
-""")
+          var: jps_output.stdout
+        """)
     hadoop_start_playbook_path = os.path.join(cluster_folder, "hadoop_start_services.yml")
     try:
         with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
@@ -1968,16 +2008,16 @@ def create_cluster_ha():
     except Exception as e:
         return jsonify({"error": "Error writing HA start playbook", "details": str(e)}), 500
 
-    # -----------------------------
-    # Définir le préfixe pour ansible-playbook (si besoin)
-    # -----------------------------
+    ##############################################
+    # Définir le préfixe pour ansible-playbook (si nécessaire)
+    ##############################################
     ansible_cmd_prefix = ""
     if platform.system() == "Windows":
-        ansible_cmd_prefix = ""  # Aucun préfixe si WSL n'est pas utilisé
+        ansible_cmd_prefix = ""
 
-# -----------------------------
-# 11. Exécuter le playbook de configuration HA sur tous les nœuds
-# -----------------------------
+    ##############################################
+    # Exécuter le playbook de configuration HA sur tous les nœuds
+    ##############################################
     try:
         inventory_file_in_vm = os.path.basename(inventory_path)
         config_cmd = (
@@ -1987,8 +2027,9 @@ def create_cluster_ha():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "Error configuring HA Hadoop", "details": str(e)}), 500
 
-# 12. Exécuter le playbook de démarrage HA sur tous les nœuds
- 
+    ##############################################
+    # Exécuter le playbook de démarrage HA sur tous les nœuds
+    ##############################################
     try:
         start_cmd = (
             f'vagrant ssh {namenode_lines[0].split()[0]} -c "cd /vagrant && {ansible_cmd_prefix}ansible-playbook -i {inventory_file_in_vm} hadoop_start_services.yml"'
@@ -1998,11 +2039,10 @@ def create_cluster_ha():
         return jsonify({"error": "Error starting HA Hadoop services", "details": str(e)}), 500
 
     return jsonify({
-        "message": f"Cluster HA '{cluster_name}' created successfully.",
+        "message": f"Cluster HA '{cluster_data.get('clusterName')}' created successfully.",
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path,
         "haComponents": cluster_data.get("haComponents")
-    }), 200
-
+    }), 20
 if __name__ == '__main__':
     app.run(debug=True)
