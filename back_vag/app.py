@@ -1549,8 +1549,9 @@ def create_cluster_ha():
                     # Extraction sur le nœud cible
                     install_cmd = (
                         f'vagrant ssh {target_hostname} -c "'
-                        'sudo rm -rf /etc/zookeeper && '
+                        #'sudo rm -rf /etc/zookeeper && '
                         'sudo tar -xzf /tmp/zookeeper_etc.tar.gz -C /etc && '
+                        'sudo mkdir -p /etc/zookeeper/conf && '  # S'assure que conf existe
                         'sudo mkdir -p /var/lib/zookeeper /var/log/zookeeper && '
                         'sudo chown -R vagrant:vagrant /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper"'
                     )
@@ -1565,10 +1566,19 @@ def create_cluster_ha():
     Configure le fichier /var/lib/zookeeper/myid pour chaque nœud ZooKeeper :
       - Pour chaque nœud identifié comme ZooKeeper, écrit l'ID (zookeeperId) dans le fichier myid
     """
+    zk_nodes = [n for n in cluster_data.get("nodeDetails", []) if n.get("isZookeeper")]
+    
+    # Génération automatique des IDs manquants
+    for idx, node in enumerate(zk_nodes, start=1):
+        if "zookeeperId" not in node:
+            node["zookeeperId"] = idx
+            print(f"ATTENTION: ID généré pour {node.get('hostname')}: {idx}")
     for node in cluster_data.get("nodeDetails", []):
         if node.get("isZookeeper", False):
             hostname = node.get("hostname")
+            print(hostname)
             server_id = node.get("zookeeperId")
+            print(server_id)
             if hostname and server_id:
                 try:
                     configure_cmd = (
@@ -1897,7 +1907,7 @@ def create_cluster_ha():
   become: yes
   tasks:
     - name: Démarrer ZooKeeper
-      shell: "/usr/bin/zkServer.sh start"
+      shell: "/etc/zookeeper/bin/zkServer.sh start"
       become_user: vagrant
       environment:
           ZOO_LOG_DIR: "/var/log/zookeeper"
