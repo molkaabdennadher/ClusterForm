@@ -1354,7 +1354,7 @@ def create_cluster_ha():
         "ansible_user=vagrant\n"
         "ansible_python_interpreter=/usr/bin/python3\n"
         "ansible_ssh_common_args='-o StrictHostKeyChecking=no'\n\n"
-        "java_home=/usr/lib/jvm/default-java\n"
+        "java_home=/usr/lib/jvm/java-11-openjdk-amd64\n"
         "hadoop_home=/opt/hadoop\n"
     )
     inventory_content = global_vars + inventory_content
@@ -1601,7 +1601,7 @@ def create_cluster_ha():
 
             # Configuration des variables d'environnement pour Hadoop
             configure_env_cmd1 = (
-                f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
+                f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64\' >> ~/.bashrc && '
                 f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
                 f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
             )
@@ -1936,15 +1936,23 @@ def create_cluster_ha():
           JAVA_HOME: "{{ java_home }}"
       executable: /bin/bash
       when: inventory_hostname == groups['namenode'][0]
-
+                                                          
 - name: Formater le NameNode (si nécessaire)
   hosts: namenode
   become: yes
   tasks:
+    - name: Créer le répertoire namenode
+      file:
+        path: "{{ hadoop_home }}/data/hdfs/namenode"
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+                                            
     - name: Formater le NameNode (si nécessaire)
       shell: "{{ hadoop_home }}/bin/hdfs --config {{ hadoop_home }}/etc/hadoop namenode -format -force -clusterId ha-cluster -nonInteractive"
       args:
-          creates: "/var/hadoop/hdfs/namenode/current/VERSION"
+          creates: "{{ hadoop_home }}/data/hdfs/namenode/current/VERSION"
       become_user: vagrant
       environment:
           JAVA_HOME: "{{ java_home }}"
@@ -1955,14 +1963,18 @@ def create_cluster_ha():
   become: yes
   tasks:
     - name: Démarrer HDFS
-      shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+      shell: "echo $JAVA_HOME && java -version"
       become_user: vagrant
       environment:
-          JAVA_HOME: "{{ java_home }}"
-          HDFS_NAMENODE_USER: vagrant
-          HDFS_DATANODE_USER: vagrant
-          HDFS_SECONDARYNAMENODE_USER: vagrant
-      executable: /bin/bash
+        JAVA_HOME: "{{ java_home }}"
+        HADOOP_HOME: "{{ hadoop_home }}"  # Critique pour trouver les binaires
+        HADOOP_CONF_DIR: "{{ hadoop_home }}/etc/hadoop"
+        PATH: "{{ java_home }}/bin:{{ hadoop_home }}/bin:{{ hadoop_home }}/sbin:{{ ansible_env.PATH }}"
+        HDFS_NAMENODE_USER: vagrant
+        HDFS_DATANODE_USER: vagrant
+        HDFS_SECONDARYNAMENODE_USER: vagrant
+      args:
+        executable: /bin/bash                                                                                                              
 
 - name: Démarrer YARN sur les ResourceManagers
   hosts: resourcemanager
