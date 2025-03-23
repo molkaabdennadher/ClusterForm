@@ -1906,6 +1906,7 @@ def create_cluster_ha():
   hosts: zookeeper
   become: yes
   tasks:
+                                            
     - name: Démarrer ZooKeeper
       shell: "/etc/zookeeper/bin/zkServer.sh start"
       become_user: vagrant
@@ -1913,7 +1914,21 @@ def create_cluster_ha():
           ZOO_LOG_DIR: "/var/log/zookeeper"
           ZOO_CONF_DIR: "/etc/zookeeper/conf"
       executable: /bin/bash
-
+                                            
+    - name: Créer les répertoires de logs
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: 0755
+                                            
+    - name: Configurer hadoop-env.sh
+      lineinfile:
+        path: /opt/hadoop/etc/hadoop/hadoop-env.sh
+        line: "export JAVA_HOME={{ java_home }}"
+        state: present  
+                                            
 - name: Démarrer le JournalNode sur les nœuds ZooKeeper
   hosts: zookeeper
   become: yes
@@ -1948,34 +1963,29 @@ def create_cluster_ha():
         owner: vagrant
         group: vagrant
         mode: '0755'
-                                            
+                                                                                                                               
     - name: Formater le NameNode (si nécessaire)
-      shell: "{{ hadoop_home }}/bin/hdfs --config {{ hadoop_home }}/etc/hadoop namenode -format -force -clusterId ha-cluster -nonInteractive"
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"
       args:
           creates: "{{ hadoop_home }}/data/hdfs/namenode/current/VERSION"
       become_user: vagrant
       environment:
           JAVA_HOME: "{{ java_home }}"
-      executable: /bin/bash
-
-- name: Démarrer HDFS sur les NameNodes
-  hosts: namenode
-  become: yes
-  tasks:
-    - name: Démarrer HDFS
-      shell: "echo $JAVA_HOME && java -version"
+      when: inventory_hostname == groups['namenode'][0]
+    
+    - name: Bootstrap standby NameNode                                        
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -bootstrapStandby"
       become_user: vagrant
       environment:
-        JAVA_HOME: "{{ java_home }}"
-        HADOOP_HOME: "{{ hadoop_home }}"  # Critique pour trouver les binaires
-        HADOOP_CONF_DIR: "{{ hadoop_home }}/etc/hadoop"
-        PATH: "{{ java_home }}/bin:{{ hadoop_home }}/bin:{{ hadoop_home }}/sbin:{{ ansible_env.PATH }}"
-        HDFS_NAMENODE_USER: vagrant
-        HDFS_DATANODE_USER: vagrant
-        HDFS_SECONDARYNAMENODE_USER: vagrant
-      args:
-        executable: /bin/bash                                                                                                              
-
+          JAVA_HOME: "{{ java_home }}"  
+      when: inventory_hostname != groups['namenode_standby'][0]
+                                            
+    - name: Démarrer les services HDFS
+      shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+                                                                                                                                                    
 - name: Démarrer YARN sur les ResourceManagers
   hosts: resourcemanager
   become: yes
