@@ -355,7 +355,6 @@ def open_terminal_vm():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
 @app.route('/get-cpu-info', methods=['GET'])
 def get_cpu_info():
     """
@@ -2082,8 +2081,37 @@ def create_cluster_ha():
 
     - name: Pause pour démarrage du ResourceManager
       pause:
-          seconds: 20                                     
+          seconds: 20 
 
+- name: Restart  ResourceManagers
+  hosts: resourcemanager_standby
+  become: yes
+  tasks:
+    - name: stopper Ressource Manager standby
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh stop resourcemanager"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+
+    - name: "Wait for the active RM to start"
+      pause:
+          seconds: 10
+      when: inventory_hostname == groups['resourcemanager_standby'][0]   
+
+- name: Re-Démarrer YARN sur les ResourceManagers
+  hosts: resourcemanager
+  become: yes
+  tasks:                                            
+    - name: Démarrer YARN
+      shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      ignore_errors: yes  
+                                                                                        
 - name: Vérifier les services Hadoop (jps)
   hosts: all
   become: yes
