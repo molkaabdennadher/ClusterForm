@@ -1536,14 +1536,18 @@ def create_cluster_ha():
     for node in cluster_data.get("nodeDetails", []):
         if node.get("isZookeeper", False):
             target_hostname = node.get("hostname")
+            print(target_hostname)
+            target_ip = node.get("ip")  # Supposons que cluster_data contient les IPs
+            
             if target_hostname and target_hostname != nameNode_hostname:
                 try:
-                    # Transfert via SCP depuis le NameNode
+                    # Utiliser l'IP pour SCP
                     scp_cmd = (
                         f'vagrant ssh {nameNode_hostname} -c "'
-                        f'scp /tmp/zookeeper_etc.tar.gz {target_hostname}:/tmp/"'
+                        f'scp -o StrictHostKeyChecking=no '
+                        f'/tmp/zookeeper_etc.tar.gz vagrant@{target_ip}:/tmp/"'
                     )
-                    subprocess.run(scp_cmd, shell=True, cwd=cluster_folder, check=True)
+                    subprocess.run(scp_cmd, shell=True, check=True, cwd=cluster_folder)
 
                     # Extraction sur le nœud cible
                     install_cmd = (
@@ -1582,6 +1586,7 @@ def create_cluster_ha():
                 try:
                     configure_cmd = (
                         f'vagrant ssh {hostname} -c "'
+                        'sudo mkdir -p /var/lib/zookeeper && '
                         f'echo {server_id} | sudo tee /var/lib/zookeeper/myid"'
                     )
                     subprocess.run(configure_cmd, shell=True, cwd=cluster_folder, check=True)
