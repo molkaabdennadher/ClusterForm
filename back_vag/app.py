@@ -1750,7 +1750,8 @@ def create_cluster_ha():
 
     # ---- Template yarn-site.xml.j2 ----
     yarn_site_template = textwrap.dedent("""\
-        <configuration>
+    <configuration>
+        <!-- Paramètres HA de base -->
         <property>
             <name>yarn.resourcemanager.ha.enabled</name>
             <value>true</value>
@@ -1761,8 +1762,16 @@ def create_cluster_ha():
         </property>
         <property>
             <name>yarn.resourcemanager.ha.rm-ids</name>
-            <value>{{ groups['resourcemanager'][0] }},{{ groups['resourcemanager_standby'][0] }}</value>
+            <value>rm1,rm2</value>
         </property>
+
+        <!-- Configuration Zookeeper -->
+        <property>
+            <name>yarn.resourcemanager.zk-address</name>
+            <value>{% for host in groups['zookeeper'] %}{{ host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>
+        </property>
+
+        <!-- Adresses des nœuds -->
         <property>
             <name>yarn.resourcemanager.hostname.rm1</name>
             <value>{{ groups['resourcemanager'][0] }}</value>
@@ -1771,6 +1780,18 @@ def create_cluster_ha():
             <name>yarn.resourcemanager.hostname.rm2</name>
             <value>{{ groups['resourcemanager_standby'][0] }}</value>
         </property>
+
+        <!-- Configuration du recovery -->
+        <property>
+            <name>yarn.resourcemanager.recovery.enabled</name>
+            <value>true</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.store.class</name>
+            <value>org.apache.hadoop.yarn.server.resourcemanager.recovery.ZKRMStateStore</value>
+        </property>
+
+        <!-- Configuration des ports -->
         <property>
             <name>yarn.resourcemanager.webapp.address.rm1</name>
             <value>{{ groups['resourcemanager'][0] }}:8088</value>
@@ -1779,8 +1800,18 @@ def create_cluster_ha():
             <name>yarn.resourcemanager.webapp.address.rm2</name>
             <value>{{ groups['resourcemanager_standby'][0] }}:8088</value>
         </property>
-        </configuration>
-        """)
+
+        <!-- Configuration NodeManager -->
+        <property>
+            <name>yarn.nodemanager.resource.memory-mb</name>
+            <value>4096</value>
+        </property>
+        <property>
+            <name>yarn.nodemanager.resource.cpu-vcores</name>
+            <value>4</value>
+        </property>
+    </configuration>
+    """)
     with open(os.path.join(templates_dir, "yarn-site.xml.j2"), "w", encoding="utf-8") as f:
         f.write(yarn_site_template)
 
@@ -1929,16 +1960,29 @@ def create_cluster_ha():
         line: "export JAVA_HOME={{ java_home }}"
         state: present  
                                             
-- name: Démarrer le JournalNode sur les nœuds ZooKeeper
+- name: Configuration des JournalNodes
   hosts: zookeeper
   become: yes
   tasks:
-    - name: Démarrer le JournalNode
-      shell: "{{ hadoop_home }}/bin/hdfs --daemon start journalnode"
+    - name: Créer le répertoire JournalNode
+      file:
+        path: /opt/hadoop/data/hdfs/journalnode
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
+    - name: Démarrer JournalNode en arrière-plan
+      shell: "nohup {{ hadoop_home }}/bin/hdfs --daemon start journalnode > /tmp/journalnode.log 2>&1 &"
       become_user: vagrant
       environment:
-          JAVA_HOME: "{{ java_home }}"
-      executable: /bin/bash
+        JAVA_HOME: "{{ java_home }}"
+        HADOOP_LOG_DIR: "/opt/hadoop/logs"
+
+    - name: Vérifier que le JournalNode est actif
+      wait_for:
+        port: 8485
+        timeout: 60
 
 - name: Initialiser le HA dans ZooKeeper (uniquement sur le NameNode actif)
   hosts: namenode
@@ -1972,19 +2016,28 @@ def create_cluster_ha():
       environment:
           JAVA_HOME: "{{ java_home }}"
       when: inventory_hostname == groups['namenode'][0]
-    
-    - name: Bootstrap standby NameNode                                        
-      shell: "{{ hadoop_home }}/bin/hdfs namenode -bootstrapStandby"
-      become_user: vagrant
-      environment:
-          JAVA_HOME: "{{ java_home }}"  
-      when: inventory_hostname != groups['namenode_standby'][0]
                                             
     - name: Démarrer les services HDFS
       shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
       become_user: vagrant
       environment:
           JAVA_HOME: "{{ java_home }}"
+
+- name: Configurer le NameNode standby
+  hosts: namenode_standby
+  become: yes
+  tasks:
+    - name: Bootstrap du standby
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -bootstrapStandby -force"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+
+    - name: Démarrer le standby
+      shell: "{{ hadoop_home }}/sbin/hadoop-daemon.sh start namenode"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: "{{ java_home }}"                                       
                                                                                                                                                     
 - name: Démarrer YARN sur les ResourceManagers
   hosts: resourcemanager
@@ -2020,7 +2073,7 @@ def create_cluster_ha():
       executable: /bin/bash
 
 - name: Vérifier les services Hadoop (jps)
-  hosts: hadoop
+  hosts: all
   become: yes
   tasks:
     - name: Vérifier les processus avec jps
