@@ -1613,6 +1613,7 @@ def create_cluster_ha():
                 f'echo \'export PATH=$PATH:$ZOOKEEPER_HOME/bin\' >> ~/.bashrc && '
                 f'echo \'export ZOO_LOG_DIR=/var/log/zookeeper\' >> ~/.bashrc"'
                 
+                
 
             )
             subprocess.run(configure_env_cmd2, shell=True, cwd=cluster_folder, check=True)
@@ -2032,45 +2033,56 @@ def create_cluster_ha():
       become_user: vagrant
       environment:
         JAVA_HOME: "{{ java_home }}"
+      register: bootstrap_result
+      failed_when: "bootstrap_result.rc != 0 or 'FATAL' in bootstrap_result.stderr"
 
-    - name: Démarrer le standby
-      shell: "{{ hadoop_home }}/sbin/hadoop-daemon.sh start namenode"
+- name: demarrer les services hdfs
+  hosts: namenode
+  become: yes
+  tasks:                          
+    - name: Démarrer les services HDFS
+      shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
       become_user: vagrant
       environment:
-        JAVA_HOME: "{{ java_home }}"                                       
-                                                                                                                                                    
+          JAVA_HOME: "{{ java_home }}"
+      ignore_errors: yes
+                                                                                                                                                                                                                                                                                  
 - name: Démarrer YARN sur les ResourceManagers
   hosts: resourcemanager
   become: yes
   tasks:
+    - name: Démarrer Ressource Manager Active
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start resourcemanager"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      when: inventory_hostname == groups['resourcemanager'][0]
+
+    - name: "Wait for the active RM to start"
+      pause:
+          seconds: 10
+      when: inventory_hostname == groups['resourcemanager'][0]                                                                                        
+                                            
     - name: Démarrer YARN
       shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
       become_user: vagrant
       environment:
           JAVA_HOME: "{{ java_home }}"
       executable: /bin/bash"
-      
+      ignore_errors: yes                                      
+                                                  
     - name: Démarrer explicitement le ResourceManager en arrière-plan
       shell: "nohup {{ hadoop_home }}/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
       become_user: vagrant
       environment:
           JAVA_HOME: "{{ java_home }}"
       executable: /bin/bash
+      ignore_errors: yes                                      
 
     - name: Pause pour démarrage du ResourceManager
       pause:
-          seconds: 20
-
-- name: Démarrer le NodeManager sur les DataNodes
-  hosts: nodemanagers
-  become: yes
-  tasks:
-    - name: Démarrer le NodeManager
-      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start nodemanager"
-      become_user: vagrant
-      environment:
-          JAVA_HOME: "{{ java_home }}"
-      executable: /bin/bash
+          seconds: 20                                     
 
 - name: Vérifier les services Hadoop (jps)
   hosts: all
@@ -2093,9 +2105,9 @@ def create_cluster_ha():
     except Exception as e:
         return jsonify({"error": "Error writing HA start playbook", "details": str(e)}), 500
 
-    ##############################################
+    ###########################################################
     # Définir le préfixe pour ansible-playbook (si nécessaire)
-    ##############################################
+    ###########################################################
     ansible_cmd_prefix = ""
     if platform.system() == "Windows":
         ansible_cmd_prefix = ""
