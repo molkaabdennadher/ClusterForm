@@ -2174,5 +2174,10 @@ def create_cluster_ha():
         "inventory_file": inventory_path,
         "haComponents": cluster_data.get("haComponents")
     }), 20
+
+######################test#################################
+
+
+
 if __name__ == '__main__':
     app.run(debug=True)

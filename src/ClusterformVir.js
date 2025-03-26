@@ -1,84 +1,64 @@
 import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import OSVersionSelect from './OSVersionSelect';
-import CustomBox from './CustomBox';
+import OSVersionSelect from "./OSVersionSelect";
+import CustomBox from "./CustomBox";
 
 export default function ClusterFormVir() {
   const location = useLocation();
   const navigate = useNavigate();
+
+  // Récupération des données globales du cluster depuis location.state ou valeurs par défaut
+  const {
+    clusterName = "Default Cluster",
+    clusterDescription = "",
+    nodeCount = 3,
+    clusterType = "default",
+    isHaSelected = false,
+  } = location.state || {};
 
   // États pour la gestion des boîtes personnalisées
   const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
   const [customRam, setCustomRam] = useState(4);
   const [customCpu, setCustomCpu] = useState(2);
   const [customBoxes, setCustomBoxes] = useState(() => {
-    const savedBoxes = localStorage.getItem("customBoxes");
-    return savedBoxes ? JSON.parse(savedBoxes) : [];
+    const saved = localStorage.getItem("customBoxes");
+    return saved ? JSON.parse(saved) : [];
   });
 
   // Options du système d'exploitation
   const [osOptions, setOsOptions] = useState(() => {
-    const savedOptions = localStorage.getItem("osOptions");
-    return savedOptions ? JSON.parse(savedOptions) : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
+    const saved = localStorage.getItem("osOptions");
+    return saved
+      ? JSON.parse(saved)
+      : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
   });
 
-  // Récupération des données globales du cluster
-  const { clusterName, clusterDescription, nodeCount, clusterType, isHaSelected } = location.state;
+  // État pour stocker la liste des nœuds (récupérée depuis le formulaire)
+  const [nodeDetails, setNodeDetails] = useState([]);
 
-  // État pour gérer les détails des nœuds
-  const [currentNode, setCurrentNode] = useState(0);
-  const [nodeDetails, setNodeDetails] = useState([
-    {
-      hostname: "ayoub12",
-      osVersion: "ubuntu/bionic64",
-      ram: 4,
-      cpu: 2,
-      ip: "192.168.56.81",
-      nodeDescription: "",
-      isNameNode: true,
-      isNameNodeStandby: false,
-      isResourceManager: true,
-      isResourceManagerStandby: false,
-      isDataNode: true,
-      isNodeManager: true,
-      isZookeeper: true,
-      isJournalNode: true
-    },
-    {
-      hostname: "ayoub16",
-      osVersion: "ubuntu/bionic64",
-      ram: 4,
-      cpu: 2,
-      ip: "192.168.56.98",
-      nodeDescription: "",
-      isNameNode: false,
-      isNameNodeStandby: true,
-      isResourceManager: false,
-      isResourceManagerStandby: true,
-      isDataNode: true,
-      isNodeManager: true,
-      isZookeeper: true,
-      isJournalNode: true
-    },
-    {
-      hostname: "ayoub198",
-      osVersion: "ubuntu/bionic64",
-      ram: 4,
-      cpu: 2,
-      ip: "192.168.56.92",
-      nodeDescription: "",
-      isNameNode: false,
-      isNameNodeStandby: false,
-      isResourceManager: false,
-      isResourceManagerStandby: false,
-      isDataNode: true,
-      isNodeManager: true,
-      isZookeeper: true,
-      isJournalNode: true
-    }
-  ]);
+  // État pour les données du nœud en cours de saisie
+  const [currentNodeData, setCurrentNodeData] = useState({
+    hostname: "",
+    osVersion: osOptions[0] || "ubuntu/bionic64",
+    ram: 4,
+    cpu: 2,
+    ip: "",
+    nodeDescription: "",
+    isNameNode: false,
+    // Les champs HA ne sont affichés et pris en compte que si isHaSelected est true
+    isNameNodeStandby: isHaSelected ? false : undefined,
+    isResourceManager: false,
+    isResourceManagerStandby: isHaSelected ? false : undefined,
+    isDataNode: false,
+    isNodeManager: false,
+    isZookeeper: isHaSelected ? false : undefined,
+    isJournalNode: isHaSelected ? false : undefined,
+  });
 
-  // Effet pour écouter les changements dans le localStorage
+  // Index du nœud en cours (pour afficher "N node sur N")
+  const [currentNodeIndex, setCurrentNodeIndex] = useState(0);
+
+  // Synchronisation des options OS via localStorage
   useEffect(() => {
     const handleStorageChange = (e) => {
       if (e.key === "osOptions") {
@@ -89,16 +69,12 @@ export default function ClusterFormVir() {
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
-  // Fonction pour mettre à jour les détails d'un nœud
-  const handleNodeDetailsChange = (field, value) => {
-    setNodeDetails((prev) => {
-      const updatedDetails = [...prev];
-      updatedDetails[currentNode][field] = value;
-      return updatedDetails;
-    });
+  // Mise à jour d'un champ du formulaire pour le nœud en cours
+  const handleFieldChange = (field, value) => {
+    setCurrentNodeData((prev) => ({ ...prev, [field]: value }));
   };
 
-  // Fonction pour ajouter une boîte personnalisée
+  // Ajouter une boîte personnalisée
   const handleAddCustomBox = ({ name, ram, cpu }) => {
     const updatedBoxes = [...customBoxes, { name, ram, cpu }];
     const updatedOptions = [...osOptions, name];
@@ -108,44 +84,67 @@ export default function ClusterFormVir() {
     localStorage.setItem("osOptions", JSON.stringify(updatedOptions));
   };
 
-  // Fonction pour soumettre le formulaire
+  // Soumettre les données du nœud courant
   const handleSubmit = (e) => {
     e.preventDefault();
-  
-    if (currentNode < nodeCount - 1) {
-      setCurrentNode(currentNode + 1);
+    // Vérifier que les champs obligatoires sont renseignés
+    if (!currentNodeData.hostname || !currentNodeData.ip) {
+      alert("Veuillez renseigner au moins le hostname et l'IP.");
+      return;
+    }
+    // Ajout du nœud courant au tableau nodeDetails
+    setNodeDetails((prev) => [...prev, currentNodeData]);
+    // Réinitialiser le formulaire pour le prochain nœud
+    setCurrentNodeIndex((prev) => prev + 1);
+    if (currentNodeIndex < nodeCount - 1) {
+      setCurrentNodeData({
+        hostname: "",
+        osVersion: osOptions[0] || "ubuntu/bionic64",
+        ram: 4,
+        cpu: 2,
+        ip: "",
+        nodeDescription: "",
+        isNameNode: currentNodeIndex === 0, // par exemple, le premier est actif
+        isNameNodeStandby: isHaSelected ? false : undefined,
+        isResourceManager: currentNodeIndex === 0, // par exemple, le premier RM est actif
+        isResourceManagerStandby: isHaSelected ? false : undefined,
+        isDataNode: true,
+        isNodeManager: true,
+        isZookeeper: isHaSelected ? false : undefined,
+        isJournalNode: isHaSelected ? false : undefined,
+      });
     } else {
+      // Dernier nœud, on soumet le cluster complet
       const clusterData = {
         clusterName,
         clusterDescription,
         nodeCount,
         clusterType,
-        nodeDetails,
-        customBoxes,
         isHaSelected,
+        nodeDetails: [...nodeDetails, currentNodeData],
+        customBoxes,
       };
-  
+
       const endpoint = isHaSelected
         ? "http://localhost:5000/create_cluster_ha"
         : "http://localhost:5000/create_cluster";
-  
+
       fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(clusterData),
       })
         .then((response) => {
-          if (!response.ok) throw new Error("Erreur lors de la création du cluster");
+          if (!response.ok)
+            throw new Error("Erreur lors de la création du cluster");
           return response.json();
         })
         .then((data) => {
           console.log("Cluster créé:", data);
-          // Rediriger vers le tableau de bord avec les données du cluster
           navigate("/ClusterDashVir", { state: data });
         })
         .catch((error) => {
           console.error("Erreur:", error);
-          // Afficher un message d'erreur à l'utilisateur
           alert("Une erreur s'est produite lors de la création du cluster.");
         });
     }
@@ -163,19 +162,22 @@ export default function ClusterFormVir() {
       </div>
       <h1 className="text-4xl font-bold text-teal-600 mb-6">Cluster Form</h1>
       <form onSubmit={handleSubmit} className="bg-white p-6 rounded-lg shadow-lg w-96">
+        <h2 className="text-xl font-semibold mb-4">
+          Node {currentNodeIndex + 1} / {nodeCount}
+        </h2>
         <label className="block text-sm font-medium mb-2">Host Name:</label>
         <input
           type="text"
-          value={nodeDetails[currentNode].hostname}
-          onChange={(e) => handleNodeDetailsChange("hostname", e.target.value)}
+          value={currentNodeData.hostname}
+          onChange={(e) => handleFieldChange("hostname", e.target.value)}
           className="w-full p-2 border rounded mb-4"
-          placeholder={`Enter host name ${currentNode + 1}`}
+          placeholder="Enter host name"
           required
         />
 
         <OSVersionSelect
-          value={nodeDetails[currentNode].osVersion}
-          onChange={(value) => handleNodeDetailsChange("osVersion", value)}
+          value={currentNodeData.osVersion}
+          onChange={(value) => handleFieldChange("osVersion", value)}
           onCustomBoxSelect={setIsCustomBoxOpen}
           options={osOptions}
         />
@@ -191,53 +193,67 @@ export default function ClusterFormVir() {
           />
         )}
 
-        <label className="block text-sm font-medium">RAM: {nodeDetails[currentNode].ram} GB</label>
+        <label className="block text-sm font-medium">
+          RAM: {currentNodeData.ram} GB
+        </label>
         <input
           type="range"
           min="2"
           max="16"
           step="2"
-          value={nodeDetails[currentNode].ram}
-          onChange={(e) => handleNodeDetailsChange("ram", Number(e.target.value))}
+          value={currentNodeData.ram}
+          onChange={(e) =>
+            handleFieldChange("ram", Number(e.target.value))
+          }
           className="w-full mb-4"
         />
 
-        <label className="block text-sm font-medium">CPU: {nodeDetails[currentNode].cpu} vCPUs</label>
+        <label className="block text-sm font-medium">
+          CPU: {currentNodeData.cpu} vCPUs
+        </label>
         <input
           type="range"
           min="1"
           max="8"
           step="1"
-          value={nodeDetails[currentNode].cpu}
-          onChange={(e) => handleNodeDetailsChange("cpu", Number(e.target.value))}
+          value={currentNodeData.cpu}
+          onChange={(e) =>
+            handleFieldChange("cpu", Number(e.target.value))
+          }
           className="w-full mb-4"
         />
 
         <label className="block text-sm font-medium mb-2">IP:</label>
         <input
           type="text"
-          value={nodeDetails[currentNode].ip}
-          onChange={(e) => handleNodeDetailsChange("ip", e.target.value)}
+          value={currentNodeData.ip}
+          onChange={(e) => handleFieldChange("ip", e.target.value)}
           className="w-full p-2 border rounded mb-4"
-          placeholder={`IP address for node ${currentNode + 1}`}
+          placeholder="Enter IP address"
           required
         />
 
-        <label className="block text-sm font-medium mb-2">Node Description:</label>
+        <label className="block text-sm font-medium mb-2">
+          Node Description:
+        </label>
         <input
           type="text"
-          value={nodeDetails[currentNode].nodeDescription}
-          onChange={(e) => handleNodeDetailsChange("nodeDescription", e.target.value)}
+          value={currentNodeData.nodeDescription}
+          onChange={(e) =>
+            handleFieldChange("nodeDescription", e.target.value)
+          }
           className="w-full p-2 border rounded mb-4"
-          placeholder={`Enter node ${currentNode + 1} description`}
+          placeholder="Enter node description"
         />
 
         <div className="mb-4">
           <label className="inline-flex items-center">
             <input
               type="checkbox"
-              checked={nodeDetails[currentNode].isNameNode}
-              onChange={(e) => handleNodeDetailsChange("isNameNode", e.target.checked)}
+              checked={currentNodeData.isNameNode}
+              onChange={(e) =>
+                handleFieldChange("isNameNode", e.target.checked)
+              }
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Name Node</span>
@@ -245,8 +261,10 @@ export default function ClusterFormVir() {
           <label className="inline-flex items-center ml-4">
             <input
               type="checkbox"
-              checked={nodeDetails[currentNode].isResourceManager}
-              onChange={(e) => handleNodeDetailsChange("isResourceManager", e.target.checked)}
+              checked={currentNodeData.isResourceManager}
+              onChange={(e) =>
+                handleFieldChange("isResourceManager", e.target.checked)
+              }
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Resource Manager</span>
@@ -254,8 +272,10 @@ export default function ClusterFormVir() {
           <label className="inline-flex items-center ml-4">
             <input
               type="checkbox"
-              checked={nodeDetails[currentNode].isDataNode}
-              onChange={(e) => handleNodeDetailsChange("isDataNode", e.target.checked)}
+              checked={currentNodeData.isDataNode}
+              onChange={(e) =>
+                handleFieldChange("isDataNode", e.target.checked)
+              }
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Data Node</span>
@@ -267,8 +287,10 @@ export default function ClusterFormVir() {
             <label className="inline-flex items-center">
               <input
                 type="checkbox"
-                checked={nodeDetails[currentNode].isNameNodeStandby}
-                onChange={(e) => handleNodeDetailsChange("isNameNodeStandby", e.target.checked)}
+                checked={currentNodeData.isNameNodeStandby || false}
+                onChange={(e) =>
+                  handleFieldChange("isNameNodeStandby", e.target.checked)
+                }
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">NameNode Standby</span>
@@ -276,8 +298,10 @@ export default function ClusterFormVir() {
             <label className="inline-flex items-center ml-4">
               <input
                 type="checkbox"
-                checked={nodeDetails[currentNode].isResourceManagerStandby}
-                onChange={(e) => handleNodeDetailsChange("isResourceManagerStandby", e.target.checked)}
+                checked={currentNodeData.isResourceManagerStandby || false}
+                onChange={(e) =>
+                  handleFieldChange("isResourceManagerStandby", e.target.checked)
+                }
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">Resource Manager Standby</span>
@@ -285,8 +309,10 @@ export default function ClusterFormVir() {
             <label className="inline-flex items-center ml-4">
               <input
                 type="checkbox"
-                checked={nodeDetails[currentNode].isZookeeper}
-                onChange={(e) => handleNodeDetailsChange("isZookeeper", e.target.checked)}
+                checked={currentNodeData.isZookeeper || false}
+                onChange={(e) =>
+                  handleFieldChange("isZookeeper", e.target.checked)
+                }
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">Zookeeper</span>
@@ -294,8 +320,10 @@ export default function ClusterFormVir() {
             <label className="inline-flex items-center ml-4">
               <input
                 type="checkbox"
-                checked={nodeDetails[currentNode].isJournalNode}
-                onChange={(e) => handleNodeDetailsChange("isJournalNode", e.target.checked)}
+                checked={currentNodeData.isJournalNode || false}
+                onChange={(e) =>
+                  handleFieldChange("isJournalNode", e.target.checked)
+                }
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">Journal Node</span>
@@ -307,7 +335,7 @@ export default function ClusterFormVir() {
           type="submit"
           className="w-full bg-teal-500 text-white p-2 rounded-lg shadow-md hover:bg-teal-600"
         >
-          {currentNode < nodeCount - 1 ? "Next" : "Submit Cluster"}
+          {currentNodeIndex < nodeCount - 1 ? "Next" : "Submit Cluster"}
         </button>
       </form>
     </div>
