@@ -36,10 +36,15 @@ function App() {
       if (mode === "Local mode") {
         navigate("/formulaire", { state: { mode: "local" } });
       } else if (mode === "Distant mode") {
-        navigate("/DistantConfig", { state: { mode: "distant" } });
+        navigate("/DistantConfig", { state: { mode: "distant", option: "vm" } });
       }
     } else if (platform === "VirtualBox" && option === "Cluster") {
-      navigate("/ClusterVir");
+      if (mode === "Local mode") {
+        navigate("/ClusterVir", { state: { mode: "local" } });
+      } else if (mode === "Distant mode") {
+        navigate("/DistantConfig", { state: { mode: "distant", option: "cluster" } });
+      }
+    
     } else {
       alert(`VM created in ${mode} mode on ${platform} (${option})`);
     }

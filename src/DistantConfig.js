@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate,useLocation } from "react-router-dom";
 import ReactTooltip from "react-tooltip";
 
 
@@ -11,25 +11,36 @@ const DistantConfig = () => {
   const [email, setEmail] = useState("");
   const [remote_os, setOs] = useState("Windows");
   const [hypervisor, setHypervisor] = useState("VirtualBox");
+  const { state } = useLocation();
   const navigate = useNavigate();
+  // Récupère la valeur de l'option ("cluster" ou "vm") transmise depuis App
+  const option = state?.option; 
 
   const handleSubmit = () => {
     if (!ip || !login || !password) {
       alert("Veuillez remplir tous les champs !");
       return;
     }
-    // Navigation vers le formulaire en transmettant les infos de connexion distante
-    navigate("/formulaire", {
-      state: {
-        remote_ip: ip,
-        remote_user: login,
-        remote_password: password,
-        mail: email,
-        remote_os,
-        hypervisor,
-        mode: "distant"
-      }
-    });
+    const commonState = {
+      remote_ip: ip,
+      remote_user: login,
+      remote_password: password,
+      mail: email,
+      remote_os,
+      hypervisor,
+      mode: "distant",
+      option // facultatif, si besoin dans le composant suivant
+    };
+
+    // Redirige en fonction de l'option choisie
+    if (option === "cluster") {
+      navigate("/ClusterVir", { state: commonState });
+    } else if (option === "vm") {
+      navigate("/formulaire", { state: commonState });
+    } else {
+      // Par défaut, si aucune option n'est fournie
+      navigate("/formulaire", { state: commonState });
+    }
   };
 
   return (
