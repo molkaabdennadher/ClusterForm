@@ -1246,7 +1246,7 @@ def create_cluster():
         "inventory_file": inventory_path
     }), 200
 
-##########################################################HA----------------------------------------------------
+######################### HADOOP HA #################################HA----------------------------------------------------
 def get_nameNode_hostname(cluster_data):
     """
     Récupère le hostname du NameNode principal depuis les données du cluster.
@@ -2173,10 +2173,1040 @@ def create_cluster_ha():
         "cluster_folder": cluster_folder,
         "inventory_file": inventory_path,
         "haComponents": cluster_data.get("haComponents")
-    }), 20
+    }), 200
 
-######################test#################################
+###################### SPARK/YARN #################################
+@app.route('/create_cluster_ha_spark', methods=['POST'])
+def create_cluster_ha_spark():
+    # 1. Récupérer les données du front-end
+    cluster_data = request.get_json()
+    if not cluster_data:
+        return jsonify({"error": "No data received"}), 400
 
+    cluster_name = cluster_data.get("clusterName")
+    if not cluster_name:
+        return jsonify({"error": "Cluster name is required"}), 400
+
+    print(cluster_data)
+
+    # 2. Créer le dossier du cluster
+    cluster_folder = get_cluster_folder(cluster_name)
+
+    # 3. Générer et écrire le Vagrantfile
+    vagrantfile_content = generate_vagrantfile(cluster_data)
+    vagrantfile_path = os.path.join(cluster_folder, "Vagrantfile")
+    try:
+        with open(vagrantfile_path, "w", encoding="utf-8") as vf:
+            vf.write(vagrantfile_content)
+    except Exception as e:
+        return jsonify({"error": "Error writing Vagrantfile", "details": str(e)}), 500
+
+    # 4. Lancer les VMs via 'vagrant up'
+    try:
+        subprocess.run(["vagrant", "up"], cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error during 'vagrant up'", "details": str(e)}), 500
+
+    # 5. Générer l'inventaire Ansible HA (similaire à votre code existant)
+    node_details = cluster_data.get("nodeDetails", [])
+    inventory_lines = []
+    namenode_lines = []
+    namenode_standby_lines = []
+    resourcemanager_lines = []
+    resourcemanager_standby_lines = []
+    datanodes_lines = []
+    nodemanagers_lines = []
+    zookeeper_lines = []
+    journalnode_lines = []
+    spark_lines = []
+
+    for node in node_details:
+        hostname = node.get("hostname")
+        ip = node.get("ip")
+        if node.get("isNameNode", False):
+            namenode_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isNameNodeStandby", False):
+            namenode_standby_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isResourceManager", False):
+            resourcemanager_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isResourceManagerStandby", False):
+            resourcemanager_standby_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isDataNode", False):
+            datanodes_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isNodeManager", False):
+            nodemanagers_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isZookeeper", False):
+            zookeeper_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isJournalNode", False):
+            journalnode_lines.append(f"{hostname} ansible_host={ip}")
+        if node.get("isSparkNode"):
+            spark_lines.append(f"{hostname} ansible_host={ip}")
+
+    if namenode_lines:
+        inventory_lines.append("[namenode]")
+        inventory_lines.extend(namenode_lines)
+    if namenode_standby_lines:
+        inventory_lines.append("[namenode_standby]")
+        inventory_lines.extend(namenode_standby_lines)
+    if resourcemanager_lines:
+        inventory_lines.append("[resourcemanager]")
+        inventory_lines.extend(resourcemanager_lines)
+    if resourcemanager_standby_lines:
+        inventory_lines.append("[resourcemanager_standby]")
+        inventory_lines.extend(resourcemanager_standby_lines)
+    if datanodes_lines:
+        inventory_lines.append("[datanodes]")
+        inventory_lines.extend(datanodes_lines)
+    if nodemanagers_lines:
+        inventory_lines.append("[nodemanagers]")
+        inventory_lines.extend(nodemanagers_lines)
+    if zookeeper_lines:
+        inventory_lines.append("[zookeeper]")
+        inventory_lines.extend(zookeeper_lines)
+    if journalnode_lines:
+        inventory_lines.append("[journalnode]")
+        inventory_lines.extend(journalnode_lines)
+    if spark_lines:
+        inventory_lines.append("[spark]")
+        inventory_lines.extend(spark_lines)
+
+    global_vars = (
+        "[all:vars]\n"
+        "ansible_user=vagrant\n"
+        "ansible_python_interpreter=/usr/bin/python3\n"
+        "ansible_ssh_common_args='-o StrictHostKeyChecking=no'\n\n"
+        "java_home=/usr/lib/jvm/java-11-openjdk-amd64\n"
+        "hadoop_home=/opt/hadoop\n"
+    )
+    inventory_content = global_vars + "\n".join(inventory_lines)
+    inventory_path = os.path.join(cluster_folder, "inventory.ini")
+    try:
+        with open(inventory_path, "w", encoding="utf-8") as inv_file:
+            inv_file.write(inventory_content)
+    except Exception as e:
+        return jsonify({"error": "Error writing inventory file", "details": str(e)}), 500
+
+# 6. Installation d'Ansible sur les NameNodes
+    try:
+        namenode_hosts = [line.split()[0] for line in namenode_lines] + [line.split()[0] for line in namenode_standby_lines]
+
+        for namenode in namenode_hosts:
+            check_ansible_cmd = f'vagrant ssh {namenode} -c "which ansible-playbook"'
+            result_ansible = subprocess.run(check_ansible_cmd, shell=True, cwd=cluster_folder,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if not result_ansible.stdout.strip():
+                install_ansible_cmd = f'vagrant ssh {namenode} -c "sudo apt-get update && sudo apt-get install -y ansible"'
+                subprocess.run(install_ansible_cmd, shell=True, cwd=cluster_folder, check=True)
+            else:
+                print(f"Ansible est déjà installé sur {namenode}.")
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing Ansible on NameNodes", "details": str(e)}), 500
+
+   # --- Configuration SSH pour les NameNodes et autres nœuds ---
+    try:
+        namenode_public_keys = {}
+
+        for namenode in namenode_hosts:
+            # Générer une clé SSH si elle n'existe pas
+            gen_key_cmd = f'vagrant ssh {namenode} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+            subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            # Récupérer la clé publique
+            get_pubkey_cmd = f'vagrant ssh {namenode} -c "cat ~/.ssh/id_rsa.pub"'
+            result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        universal_newlines=True, check=True)
+            namenode_public_keys[namenode] = result_pub.stdout.strip()
+            print(f"Public key de {namenode} récupérée :", namenode_public_keys[namenode])
+
+        # Ajouter les clés dans les authorized_keys respectifs
+        for namenode in namenode_hosts:
+            for other_namenode, public_key in namenode_public_keys.items():
+                add_key_cmd = (
+                    f'vagrant ssh {namenode} -c "mkdir -p ~/.ssh && '
+                    f'grep -q {shlex.quote(public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(public_key)} >> ~/.ssh/authorized_keys && '
+                    f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                )
+                subprocess.run(add_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+        # Configuration SSH pour les autres nœuds
+        for node in node_details:
+            node_hostname = node.get("hostname")
+            if node_hostname not in namenode_hosts:
+                # Générer une clé SSH si elle n'existe pas
+                gen_key_cmd = f'vagrant ssh {node_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+                subprocess.run(gen_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                # Récupérer la clé publique
+                get_pubkey_cmd = f'vagrant ssh {node_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+                result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=cluster_folder,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            universal_newlines=True, check=True)
+                node_public_key = result_pub.stdout.strip()
+                print(f"Public key du nœud {node_hostname} récupérée :", node_public_key)
+
+                # Ajouter la clé du nœud dans son authorized_keys
+                add_self_key_cmd = (
+                    f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                    f'grep -q {shlex.quote(node_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(node_public_key)} >> ~/.ssh/authorized_keys && '
+                    f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                )
+                subprocess.run(add_self_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                # Ajouter la clé des NameNodes dans l'authorized_keys du nœud
+                for namenode, public_key in namenode_public_keys.items():
+                    add_namenode_key_cmd = (
+                        f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                        f'grep -q {shlex.quote(public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(public_key)} >> ~/.ssh/authorized_keys && '
+                        f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    )
+                    subprocess.run(add_namenode_key_cmd, shell=True, cwd=cluster_folder, check=True)
+
+                    # Ajouter la clé du nœud dans l'authorized_keys des NameNodes
+                    add_node_key_to_namenode_cmd = (
+                        f'vagrant ssh {namenode} -c "mkdir -p ~/.ssh && '
+                        f'grep -q {shlex.quote(node_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(node_public_key)} >> ~/.ssh/authorized_keys && '
+                        f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    )
+                    subprocess.run(add_node_key_to_namenode_cmd, shell=True, cwd=cluster_folder, check=True)
+
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error configuring SSH", "details": str(e)}), 500
+
+# 7. Installation de ZooKeeper sur le NameNode (version corrigée pour respecter la structure souhaitée)
+    nameNode_hostname = get_nameNode_hostname(cluster_data)
+
+    """
+    Installe ZooKeeper sur le NameNode :
+      - Télécharge l'archive de ZooKeeper
+      - Extrait l'archive dans /etc/zookeeper en supprimant les composants inutiles
+      - Copie le fichier de configuration d'exemple (zoo_sample.cfg) en zoo.cfg
+      - Crée les dossiers de données (/var/lib/zookeeper) et logs (/var/log/zookeeper)
+      - Ajuste les droits et crée une archive compressée pour le transfert
+    """
+    try:
+        prepare_cmd = (
+            f'vagrant ssh {nameNode_hostname} -c "'
+            'sudo apt-get update && '
+            'sudo apt-get install -y wget && '
+            'wget -O /tmp/zookeeper.tar.gz https://archive.apache.org/dist/zookeeper/zookeeper-3.6.3/apache-zookeeper-3.6.3-bin.tar.gz && '
+            'sudo mkdir -p /etc/zookeeper && '
+            'sudo tar -xzf /tmp/zookeeper.tar.gz -C /etc/zookeeper --strip-components=1 && '
+            'sudo cp /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg && '
+            'sudo mkdir -p /var/lib/zookeeper /var/log/zookeeper && '
+            'sudo chown -R vagrant:vagrant /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && '
+            'sudo tar -czf /tmp/zookeeper_etc.tar.gz -C /etc zookeeper"'
+        )
+        subprocess.run(prepare_cmd, shell=True, cwd=cluster_folder, check=True)
+        print("Installation sur le NameNode réussie")
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Erreur d'installation ZooKeeper sur NameNode: {str(e)}")
+# 6. Installation de Hadoop sur le primary NameNode et synchronisation de l'archive dans /vagrant
+    try:
+        primary_namenode = get_nameNode_hostname(cluster_data)
+        if not primary_namenode:
+            return jsonify({"error": "No NameNode found in cluster configuration"}), 400
+
+        check_archive_cmd = f'vagrant ssh {primary_namenode} -c "test -f /vagrant/hadoop.tar.gz"'
+        result = subprocess.run(check_archive_cmd, shell=True, cwd=cluster_folder)
+        if result.returncode != 0:
+            hadoop_install_cmd = (
+                f'vagrant ssh {primary_namenode} -c "sudo apt-get update && sudo apt-get install -y wget && '
+                f'wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && '
+                f'test -s /tmp/hadoop.tar.gz && '
+                f'sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && '
+                f'sudo mv /opt/hadoop-3.3.1 /opt/hadoop && '
+                f'rm /tmp/hadoop.tar.gz"'
+            )
+            subprocess.run(hadoop_install_cmd, shell=True, cwd=cluster_folder, check=True)
+            tar_hadoop_cmd = f'vagrant ssh {primary_namenode} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
+            subprocess.run(tar_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
+            copy_to_shared_cmd = f'vagrant ssh {primary_namenode} -c "sudo cp /tmp/hadoop.tar.gz /vagrant/hadoop.tar.gz"'
+            subprocess.run(copy_to_shared_cmd, shell=True, cwd=cluster_folder, check=True)
+        else:
+            print("L'archive Hadoop existe déjà dans /vagrant/hadoop.tar.gz, extraction sur le primary NameNode.")
+            extract_cmd = f'vagrant ssh {primary_namenode} -c "sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+            subprocess.run(extract_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing Hadoop on primary NameNode", "details": str(e)}), 500
+
+    # 8.1 Synchroniser l'archive Hadoop sur les autres nœuds
+    for node in cluster_data.get("nodeDetails", []):
+        if node.get("hostname") != primary_namenode:
+            target_hostname = node.get("hostname")
+            try:
+                copy_hadoop_cmd = (
+                    f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && '
+                    f'sudo rm -rf /opt/hadoop && '
+                    f'sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+                )
+                subprocess.run(copy_hadoop_cmd, shell=True, cwd=cluster_folder, check=True)
+            except subprocess.CalledProcessError as e:
+                return jsonify({
+                    "error": f"Error copying Hadoop to node {target_hostname}",
+                    "details": str(e)
+                }), 500
+# 7. Transférer l’archive ZooKeeper aux autres nœuds (si besoin)
+        """
+    Transfère l'archive compressée du NameNode vers les nœuds ZooKeeper :
+      - Utilise SCP pour copier l'archive depuis le NameNode vers /tmp sur le nœud cible
+      - Sur le nœud cible, supprime l'ancien dossier /etc/zookeeper et extrait l'archive dans /etc
+      - Crée les dossiers de données et logs et ajuste les permissions
+    """
+    for node in cluster_data.get("nodeDetails", []):
+        if node.get("isZookeeper", False):
+            target_hostname = node.get("hostname")
+            print(target_hostname)
+            target_ip = node.get("ip")  # Supposons que cluster_data contient les IPs
+            
+            if target_hostname and target_hostname != nameNode_hostname:
+                try:
+                    # Utiliser l'IP pour SCP
+                    scp_cmd = (
+                        f'vagrant ssh {nameNode_hostname} -c "'
+                        f'scp -o StrictHostKeyChecking=no '
+                        f'/tmp/zookeeper_etc.tar.gz vagrant@{target_ip}:/tmp/"'
+                    )
+                    subprocess.run(scp_cmd, shell=True, check=True, cwd=cluster_folder)
+
+                    # Extraction sur le nœud cible
+                    install_cmd = (
+                        f'vagrant ssh {target_hostname} -c "'
+                        #'sudo rm -rf /etc/zookeeper && '
+                        'sudo tar -xzf /tmp/zookeeper_etc.tar.gz -C /etc && '
+                        'sudo mkdir -p /etc/zookeeper/conf && '  # S'assure que conf existe
+                        'sudo mkdir -p /var/lib/zookeeper /var/log/zookeeper && '
+                        'sudo chown -R vagrant:vagrant /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper"'
+                    )
+                    subprocess.run(install_cmd, shell=True, cwd=cluster_folder, check=True)
+                    
+                    print(f"Transfert réussi sur {target_hostname}")
+                
+                except subprocess.CalledProcessError as e:
+                    print(f"Erreur sur {target_hostname}: {str(e)}")
+
+    """
+    Configure le fichier /var/lib/zookeeper/myid pour chaque nœud ZooKeeper :
+      - Pour chaque nœud identifié comme ZooKeeper, écrit l'ID (zookeeperId) dans le fichier myid
+    """
+    zk_nodes = [n for n in cluster_data.get("nodeDetails", []) if n.get("isZookeeper")]
+    
+    # Génération automatique des IDs manquants
+    for idx, node in enumerate(zk_nodes, start=1):
+        if "zookeeperId" not in node:
+            node["zookeeperId"] = idx
+            print(f"ATTENTION: ID généré pour {node.get('hostname')}: {idx}")
+    for node in cluster_data.get("nodeDetails", []):
+        if node.get("isZookeeper", False):
+            hostname = node.get("hostname")
+            print(hostname)
+            server_id = node.get("zookeeperId")
+            print(server_id)
+            if hostname and server_id:
+                try:
+                    configure_cmd = (
+                        f'vagrant ssh {hostname} -c "'
+                        'sudo mkdir -p /var/lib/zookeeper && '
+                        f'echo {server_id} | sudo tee /var/lib/zookeeper/myid"'
+                    )
+                    subprocess.run(configure_cmd, shell=True, cwd=cluster_folder, check=True)
+                    print(f"Configuration myid réussie sur {hostname}")
+                except subprocess.CalledProcessError as e:
+                    print(f"Erreur de configuration myid sur {hostname}: {str(e)}")
+# After Hadoop installation steps
+# 9. Install Spark on Spark nodes
+    try:
+        spark_nodes = [node for node in cluster_data.get("nodeDetails", []) if node.get("isSparkNode")]
+        if spark_nodes:
+            primary_spark_node = spark_nodes[0].get("hostname")
+            check_spark_archive_cmd = f'vagrant ssh {primary_spark_node} -c "test -f /vagrant/spark.tar.gz"'
+            result = subprocess.run(check_spark_archive_cmd, shell=True, cwd=cluster_folder)
+            if result.returncode != 0:
+                # Download and install Spark on the primary Spark node
+                spark_install_cmd = (
+                    f'vagrant ssh {primary_spark_node} -c "sudo apt-get update && sudo apt-get install -y wget && '
+                    f'wget -O /tmp/spark.tgz https://archive.apache.org/dist/spark/spark-3.3.1/spark-3.3.1-bin-hadoop3.tgz && '
+                    f'sudo tar -xzf /tmp/spark.tgz -C /opt && '
+                    f'sudo mv /opt/spark-3.3.1-bin-hadoop3 /opt/spark && '
+                    f'sudo chown -R vagrant:vagrant /opt/spark && '
+                    f'rm /tmp/spark.tgz && '
+                    f'sudo tar -czf /tmp/spark.tar.gz -C /opt spark"'
+                )
+                subprocess.run(spark_install_cmd, shell=True, cwd=cluster_folder, check=True)
+                copy_to_shared_cmd = f'vagrant ssh {primary_spark_node} -c "sudo cp /tmp/spark.tar.gz /vagrant/spark.tar.gz"'
+                subprocess.run(copy_to_shared_cmd, shell=True, cwd=cluster_folder, check=True)
+            else:
+                # Extract existing Spark archive on primary Spark node
+                extract_cmd = f'vagrant ssh {primary_spark_node} -c "sudo rm -rf /opt/spark && sudo tar -xzf /vagrant/spark.tar.gz -C /opt"'
+                subprocess.run(extract_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            # Distribute Spark to other Spark nodes
+            for node in spark_nodes[1:]:
+                target_hostname = node.get("hostname")
+                copy_spark_cmd = (
+                    f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && '
+                    f'sudo rm -rf /opt/spark && '
+                    f'sudo tar -xzf /vagrant/spark.tar.gz -C /opt && '
+                    f'sudo chown -R vagrant:vagrant /opt/spark"'
+                )
+                subprocess.run(copy_spark_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error installing Spark", "details": str(e)}), 500
+
+
+# 8. Installer Java, net-tools, python3 et configurer l'environnement sur tous les nœuds
+    for node in cluster_data.get("nodeDetails", []):
+        target_hostname = node.get("hostname")
+        try:
+            install_java_net_cmd = (
+                f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
+            )
+            subprocess.run(install_java_net_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            # Configuration des variables d'environnement pour Hadoop
+            configure_env_cmd1 = (
+                f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64\' >> ~/.bashrc && '
+                f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
+                f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
+            )
+            subprocess.run(configure_env_cmd1, shell=True, cwd=cluster_folder, check=True)
+
+            # Configuration des variables d'environnement pour ZooKeeper
+            configure_env_cmd2 = (
+                f'vagrant ssh {target_hostname} -c "echo \'export ZOOKEEPER_HOME=/etc/zookeeper\' >> ~/.bashrc && '
+                f'echo \'export PATH=$PATH:$ZOOKEEPER_HOME/bin\' >> ~/.bashrc && '
+                f'echo \'export ZOO_LOG_DIR=/var/log/zookeeper\' >> ~/.bashrc"'
+            )
+            subprocess.run(configure_env_cmd2, shell=True, cwd=cluster_folder, check=True)
+
+        # Configuration Spark UNIQUEMENT si c'est un nœud Spark
+            if node.get("isSparkNode"):
+                configure_spark_env_cmd = (
+                    f'vagrant ssh {target_hostname} -c "'
+                    'echo \'export SPARK_HOME=/opt/spark\' >> ~/.bashrc && '
+                    'echo \'export PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin\' >> ~/.bashrc"'
+                )
+                subprocess.run(configure_spark_env_cmd, shell=True, cwd=cluster_folder, check=True)
+                
+            # Optionnel : recharger l'environnement (bien que dans un shell non-interactif, ce soit parfois inutile)
+            refresh_env_cmd = f'vagrant ssh {target_hostname} -c "source ~/.bashrc"'
+            subprocess.run(refresh_env_cmd, shell=True, cwd=cluster_folder, check=True)
+
+            print(f"Configuration d'environnement terminée sur {target_hostname}")
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": f"Error configuring environment on node {target_hostname}", "details": str(e)}), 500
+
+
+# 10. (Optionnel) Génération des templates de configuration pour Hadoop/YARN/ZooKeeper/Spark
+    templates_dir = os.path.join(cluster_folder, "templates")
+    os.makedirs(templates_dir, exist_ok=True)
+    # Les templates core-site.xml, hdfs-site.xml, yarn-site.xml, mapred-site.xml, etc. sont générés ici...
+    # (Code de génération des templates similaire à votre endpoint HA existant)
+    # ---- Template core-site.xml.j2 ----
+    core_site_template = textwrap.dedent("""\
+        <configuration>
+        <!-- Point d'entrée HDFS (doit correspondre au nameservice défini dans hdfs-site.xml) -->
+        <property>
+            <name>fs.defaultFS</name>
+            <value>hdfs://ha-cluster</value>
+        </property>
+        <!-- Proxy de failover pour le client HDFS -->
+        <property>
+            <name>dfs.client.failover.proxy.provider.ha-cluster</name>
+            <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>
+        </property>
+        <!-- Quorum ZooKeeper pour le failover -->
+        <property>
+            <name>ha.zookeeper.quorum</name>
+            <value>{% for zk in groups['zookeeper'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>
+        </property>
+        <!-- Autres paramètres utiles -->
+        <property>
+            <name>dfs.permissions.enabled</name>
+            <value>true</value>
+        </property>
+        <property>
+            <name>ipc.client.connect.max.retries</name>
+            <value>3</value>
+        </property>
+        </configuration>
+        """)
+    with open(os.path.join(templates_dir, "core-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(core_site_template)
+
+    # ---- Template hdfs-site.xml.j2 ----
+    # On utilise ici les noms de machines tels qu'ils apparaissent dans l'inventaire (ex: ayoub12, ayoub16)
+    hdfs_site_template = textwrap.dedent("""\
+        <configuration>
+        <!-- Réplication -->
+        <property>
+            <name>dfs.replication</name>
+            <value>2</value>
+        </property>
+        <!-- Activation du mode HA -->
+        <property>
+            <name>dfs.nameservices</name>
+            <value>ha-cluster</value>
+        </property>
+        <!-- Définir les deux NameNodes (utiliser les noms de machines de l'inventaire) -->
+        <property>
+            <name>dfs.ha.namenodes.ha-cluster</name>
+            <value>{{ groups['namenode'][0] }},{{ groups['namenode_standby'][0] }}</value>
+        </property>
+        <!-- Adresses RPC et HTTP en se basant sur les noms de machines -->
+        <property>
+            <name>dfs.namenode.rpc-address.ha-cluster.{{ groups['namenode'][0] }}</name>
+            <value>{{ hostvars[groups['namenode'][0]].ansible_host }}:8020</value>
+        </property>
+        <property>
+            <name>dfs.namenode.rpc-address.ha-cluster.{{ groups['namenode_standby'][0] }}</name>
+            <value>{{ hostvars[groups['namenode_standby'][0]].ansible_host }}:8020</value>
+        </property>
+        <property>
+            <name>dfs.namenode.http-address.ha-cluster.{{ groups['namenode'][0] }}</name>
+            <value>{{ hostvars[groups['namenode'][0]].ansible_host }}:50070</value>
+        </property>
+        <property>
+            <name>dfs.namenode.http-address.ha-cluster.{{ groups['namenode_standby'][0] }}</name>
+            <value>{{ hostvars[groups['namenode_standby'][0]].ansible_host }}:50070</value>
+        </property>
+        <!-- Répertoire partagé pour les shared edits -->
+        <property>
+            <name>dfs.namenode.shared.edits.dir</name>
+            <value>qjournal://{% for jn in groups['journalnode'] %}{{ hostvars[jn].ansible_host }}:8485{% if not loop.last %};{% endif %}{% endfor %}/ha-cluster</value>
+        </property>
+        <!-- Bascule automatique -->
+        <property>
+            <name>dfs.ha.automatic-failover.enabled</name>
+            <value>true</value>
+        </property>
+        <!-- Proxy failover (idem core-site) -->
+        <property>
+            <name>dfs.client.failover.proxy.provider.ha-cluster</name>
+            <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>
+        </property>
+        <!-- Quorum ZooKeeper -->
+        <property>
+            <name>ha.zookeeper.quorum</name>
+            <value>{% for zk in groups['zookeeper'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>
+        </property>
+        <!-- Répertoires locaux -->
+        <property>
+            <name>dfs.namenode.name.dir</name>
+            <value>file:{{ hadoop_home }}/data/hdfs/namenode</value>
+        </property>
+        <property>
+            <name>dfs.datanode.data.dir</name>
+            <value>file:{{ hadoop_home }}/data/hdfs/datanode</value>
+        </property>
+        <property>
+            <name>dfs.namenode.checkpoint.dir</name>
+            <value>file:{{ hadoop_home }}/data/hdfs/namesecondary</value>
+        </property>
+        <!-- Fencing et timeout -->
+        <property>
+            <name>dfs.ha.fencing.methods</name>
+            <value>shell(/bin/true)</value>
+        </property>
+        <property>
+            <name>dfs.ha.failover-controller.active-standby-elector.zk.op.retries</name>
+            <value>3</value>
+        </property>
+        </configuration>
+        """)
+    with open(os.path.join(templates_dir, "hdfs-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(hdfs_site_template)
+
+    # ---- Template yarn-site.xml.j2 ----
+    yarn_site_template = textwrap.dedent("""\
+    <configuration>
+        <!-- Paramètres HA de base -->
+        <property>
+            <name>yarn.resourcemanager.ha.enabled</name>
+            <value>true</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.cluster-id</name>
+            <value>yarn-cluster</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.ha.rm-ids</name>
+            <value>rm1,rm2</value>
+        </property>
+
+        <!-- Configuration Zookeeper -->
+        <property>
+            <name>yarn.resourcemanager.zk-address</name>
+            <value>{% for host in groups['zookeeper'] %}{{ host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>
+        </property>
+
+        <!-- Adresses des nœuds -->
+        <property>
+            <name>yarn.resourcemanager.hostname.rm1</name>
+            <value>{{ groups['resourcemanager'][0] }}</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.hostname.rm2</name>
+            <value>{{ groups['resourcemanager_standby'][0] }}</value>
+        </property>
+
+        <!-- Configuration du recovery -->
+        <property>
+            <name>yarn.resourcemanager.recovery.enabled</name>
+            <value>true</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.store.class</name>
+            <value>org.apache.hadoop.yarn.server.resourcemanager.recovery.ZKRMStateStore</value>
+        </property>
+
+        <!-- Configuration des ports -->
+        <property>
+            <name>yarn.resourcemanager.webapp.address.rm1</name>
+            <value>{{ groups['resourcemanager'][0] }}:8088</value>
+        </property>
+        <property>
+            <name>yarn.resourcemanager.webapp.address.rm2</name>
+            <value>{{ groups['resourcemanager_standby'][0] }}:8088</value>
+        </property>
+
+        <!-- Configuration NodeManager -->
+        <property>
+            <name>yarn.nodemanager.resource.memory-mb</name>
+            <value>4096</value>
+        </property>
+        <property>
+            <name>yarn.nodemanager.resource.cpu-vcores</name>
+            <value>4</value>
+        </property>
+    </configuration>
+    """)
+    with open(os.path.join(templates_dir, "yarn-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(yarn_site_template)
+
+    # ---- Template mapred-site.xml.j2 ----
+    mapred_site_template = textwrap.dedent("""\
+        <configuration>
+        <property>
+            <name>mapreduce.framework.name</name>
+            <value>yarn</value>
+        </property>
+        </configuration>
+        """)
+    with open(os.path.join(templates_dir, "mapred-site.xml.j2"), "w", encoding="utf-8") as f:
+        f.write(mapred_site_template)
+
+    # ---- Template masters.j2 ----
+    masters_template = textwrap.dedent("""\
+        {{ groups['namenode'][0] }}
+        """)
+    with open(os.path.join(templates_dir, "masters.j2"), "w", encoding="utf-8") as f:
+        f.write(masters_template)
+
+    # ---- Template workers.j2 ----
+    workers_template = textwrap.dedent("""\
+        {% for worker in groups['datanodes'] %}
+        {{ worker }}
+        {% endfor %}
+        """)
+    with open(os.path.join(templates_dir, "workers.j2"), "w", encoding="utf-8") as f:
+        f.write(workers_template)
+
+    # ---- Template zoo.cfg.j2 ----
+    # Déployé dans le répertoire standard de ZooKeeper (/etc/zookeeper/conf)
+    zoo_cfg_template = textwrap.dedent("""\
+        tickTime=2000
+        initLimit=10
+        syncLimit=5
+        dataDir=/var/lib/zookeeper
+        clientPort=2181
+        {% for zk in groups['zookeeper'] %}
+        server.{{ loop.index }}={{ hostvars[zk].ansible_host }}:2888:3888
+        {% endfor %}
+        """)
+    with open(os.path.join(templates_dir, "zoo.cfg.j2"), "w", encoding="utf-8") as f:
+        f.write(zoo_cfg_template)
+
+    # ---- Template hosts.j2 ----
+    hosts_template = textwrap.dedent("""\
+        # ANSIBLE GENERATED HOSTS FILE
+        {% for host in groups['all'] %}
+        {{ hostvars[host].ansible_host }} {{ host }}
+        {% endfor %}
+        """)
+    with open(os.path.join(templates_dir, "hosts.j2"), "w", encoding="utf-8") as f:
+        f.write(hosts_template)
+
+    # ---- Template spark-defaults.conf.j2 ----
+    spark_defaults_template = textwrap.dedent("""\
+        spark.master                     yarn
+        spark.eventLog.enabled           true
+        spark.eventLog.dir               hdfs://ha-cluster/spark-logs
+        spark.history.fs.logDirectory    hdfs://ha-cluster/spark-logs
+        spark.serializer                 org.apache.spark.serializer.KryoSerializer
+        spark.hadoop.yarn.resourcemanager.ha.enabled   true
+        spark.hadoop.yarn.resourcemanager.ha.rm-ids    rm1,rm2
+        spark.hadoop.yarn.resourcemanager.hostname.rm1 {{ groups['resourcemanager'][0] }}
+        spark.hadoop.yarn.resourcemanager.hostname.rm2 {{ groups['resourcemanager_standby'][0] }}
+        spark.driver.memory              1g
+        spark.executor.memory            2g
+        spark.hadoop.yarn.resourcemanager.address {{ groups['resourcemanager'][0] }}:8032
+        spark.hadoop.yarn.resourcemanager.scheduler.address {{ groups['resourcemanager'][0] }}:8030
+        """)
+    with open(os.path.join(templates_dir, "spark-defaults.conf.j2"), "w", encoding="utf-8") as f:
+        f.write(spark_defaults_template)
+
+    # ---- Template spark-env.sh.j2 ----
+    spark_env_template = textwrap.dedent("""\
+        export HADOOP_CONF_DIR={{ hadoop_home }}/etc/hadoop
+        export SPARK_HOME=/opt/spark
+        export SPARK_DIST_CLASSPATH=$({{ hadoop_home }}/bin/hadoop classpath)
+        export JAVA_HOME={{ java_home }}
+        """)
+    with open(os.path.join(templates_dir, "spark-env.sh.j2"), "w", encoding="utf-8") as f:
+        f.write(spark_env_template)
+
+
+    # 11. (Optionnel) Génération du playbook Ansible HA pour déployer la configuration sur le cluster
+
+    ######################################################################
+    # Création du playbook de configuration HA Hadoop (hadoop_config.yml)
+    ######################################################################
+    hadoop_config_playbook = textwrap.dedent("""\
+---
+- name: Configurer HA Hadoop et mettre à jour /etc/hosts
+  hosts: all
+  become: yes
+  vars:
+    namenode_hostname: "{{ groups['namenode'][0] }}"
+  tasks:
+    - name: Déployer core-site.xml
+      template:
+        src: templates/core-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/core-site.xml"
+
+    - name: Déployer hdfs-site.xml
+      template:
+        src: templates/hdfs-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/hdfs-site.xml"
+
+    - name: Déployer yarn-site.xml
+      template:
+        src: templates/yarn-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/yarn-site.xml"
+
+    - name: Déployer mapred-site.xml
+      template:
+        src: templates/mapred-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/mapred-site.xml"
+
+    - name: Déployer masters
+      template:
+        src: templates/masters.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/masters"
+
+    - name: Déployer workers
+      template:
+        src: templates/workers.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/workers"
+
+    - name: Déployer zoo.cfg pour ZooKeeper
+      template:
+        src: templates/zoo.cfg.j2
+        dest: "/etc/zookeeper/conf/zoo.cfg"
+
+    - name: Mettre à jour /etc/hosts avec les hôtes du cluster
+      template:
+        src: templates/hosts.j2
+        dest: /etc/hosts
+
+- name: Configurer les nœuds Spark  # <-- Début d'une NOUVELLE play
+  hosts: spark                      # Aligné avec '- name'
+  become: yes                       # Aligné avec 'hosts'
+  tasks:
+    - name: Créer le répertoire de configuration Spark
+      file:                         # Aligné sous 'tasks'
+        path: /opt/spark/conf
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: 0755
+
+    - name: Déployer spark-defaults.conf
+      template:                     # Aligné sous 'tasks'
+        src: templates/spark-defaults.conf.j2
+        dest: /opt/spark/conf/spark-defaults.conf
+
+    - name: Déployer spark-env.sh
+      template:                    # Aligné sous 'tasks'
+        src: templates/spark-env.sh.j2
+        dest: /opt/spark/conf/spark-env.sh
+        """)
+    hadoop_config_playbook_path = os.path.join(cluster_folder, "hadoop_config.yml")
+    try:
+        with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
+            f.write(hadoop_config_playbook)
+    except Exception as e:
+        return jsonify({"error": "Error writing HA config playbook", "details": str(e)}), 500
+
+    ############################################################################
+    # Création du playbook de démarrage HA Hadoop (hadoop_start_services.yml)
+    #############################################################################
+    # Ordre important : démarrer ZooKeeper et JournalNodes avant le formatage du NameNode, 
+    # puis initialiser HA dans ZooKeeper, formater le NameNode, et enfin démarrer HDFS/YARN.
+    hadoop_start_playbook = textwrap.dedent("""\
+---
+- name: Démarrer ZooKeeper sur les nœuds ZooKeeper
+  hosts: zookeeper
+  become: yes
+  tasks:
+                                            
+    - name: Démarrer ZooKeeper
+      shell: "/etc/zookeeper/bin/zkServer.sh start"
+      become_user: vagrant
+      environment:
+          ZOO_LOG_DIR: "/var/log/zookeeper"
+          ZOO_CONF_DIR: "/etc/zookeeper/conf"
+      executable: /bin/bash
+      ignore_errors: yes                                      
+                                            
+    - name: Créer les répertoires de logs
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: 0755
+                                            
+    - name: Configurer hadoop-env.sh
+      lineinfile:
+        path: /opt/hadoop/etc/hadoop/hadoop-env.sh
+        line: "export JAVA_HOME={{ java_home }}"
+        state: present  
+
+- name: Créer le dossier Spark dans HDFS
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Créer le dossier Spark logs
+      file:
+        path: /spark-logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: 0755
+      when: inventory_hostname == groups['namenode'][0]
+                                                                                        
+- name: Configuration des JournalNodes
+  hosts: zookeeper
+  become: yes
+  tasks:
+    - name: Créer le répertoire JournalNode
+      file:
+        path: /opt/hadoop/data/hdfs/journalnode
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
+    - name: Démarrer JournalNode en arrière-plan
+      shell: "nohup {{ hadoop_home }}/bin/hdfs --daemon start journalnode > /tmp/journalnode.log 2>&1 &"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+        HADOOP_LOG_DIR: "/opt/hadoop/logs"
+
+    - name: Vérifier que le JournalNode est actif
+      wait_for:
+        port: 8485
+        timeout: 60
+
+- name: Initialiser le HA dans ZooKeeper (uniquement sur le NameNode actif)
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Initialiser HA dans ZooKeeper
+      shell: "{{ hadoop_home }}/bin/hdfs zkfc -formatZK -force -nonInteractive"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash
+      when: inventory_hostname == groups['namenode'][0]
+                                                          
+- name: Formater le NameNode (si nécessaire)
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Créer le répertoire namenode
+      file:
+        path: "{{ hadoop_home }}/data/hdfs/namenode"
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+                                                                                                                               
+    - name: Formater le NameNode (si nécessaire)
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"
+      args:
+          creates: "{{ hadoop_home }}/data/hdfs/namenode/current/VERSION"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      when: inventory_hostname == groups['namenode'][0]
+                                            
+    - name: Démarrer les services HDFS
+      shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+
+- name: Configurer le NameNode standby
+  hosts: namenode_standby
+  become: yes
+  tasks:
+    - name: Bootstrap du standby
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -bootstrapStandby -force"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: bootstrap_result
+      failed_when: "bootstrap_result.rc != 0 or 'FATAL' in bootstrap_result.stderr"
+
+- name: demarrer les services hdfs
+  hosts: namenode
+  become: yes
+  tasks:                          
+    - name: Démarrer les services HDFS
+      shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      ignore_errors: yes
+                                                                                                                                                                                                                                                                                  
+- name: Démarrer YARN sur les ResourceManagers
+  hosts: resourcemanager
+  become: yes
+  tasks:
+    - name: Démarrer Ressource Manager Active
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start resourcemanager"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      when: inventory_hostname == groups['resourcemanager'][0]
+
+    - name: "Wait for the active RM to start"
+      pause:
+          seconds: 10
+      when: inventory_hostname == groups['resourcemanager'][0]                                                                                        
+                                            
+    - name: Démarrer YARN
+      shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      ignore_errors: yes                                      
+                                                  
+    - name: Démarrer explicitement le ResourceManager en arrière-plan
+      shell: "nohup {{ hadoop_home }}/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash
+      ignore_errors: yes                                      
+
+    - name: Pause pour démarrage du ResourceManager
+      pause:
+          seconds: 20 
+
+- name: Restart  ResourceManagers
+  hosts: resourcemanager_standby
+  become: yes
+  tasks:
+    - name: stopper Ressource Manager standby
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh stop resourcemanager"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+
+    - name: "Wait for the active RM to start"
+      pause:
+          seconds: 10
+      when: inventory_hostname == groups['resourcemanager_standby'][0]   
+
+- name: Re-Démarrer YARN sur les ResourceManagers
+  hosts: resourcemanager
+  become: yes
+  tasks:                                            
+    - name: Démarrer YARN
+      shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+      become_user: vagrant
+      environment:
+          JAVA_HOME: "{{ java_home }}"
+      executable: /bin/bash"
+      ignore_errors: yes  
+                                                                                        
+- name: Vérifier les services Hadoop (jps)
+  hosts: all
+  become: yes
+  tasks:
+    - name: Vérifier les processus avec jps
+      shell: "jps"
+      register: jps_output
+      become_user: vagrant
+      executable: /bin/bash
+
+    - name: Afficher la sortie de jps
+      debug:
+          var: jps_output.stdout
+        """)
+    hadoop_start_playbook_path = os.path.join(cluster_folder, "hadoop_start_services.yml")
+    try:
+        with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
+            f.write(hadoop_start_playbook)
+    except Exception as e:
+        return jsonify({"error": "Error writing HA start playbook", "details": str(e)}), 500
+
+    ###########################################################
+    # Définir le préfixe pour ansible-playbook (si nécessaire)
+    ###########################################################
+    ansible_cmd_prefix = ""
+    if platform.system() == "Windows":
+        ansible_cmd_prefix = ""
+
+    ##############################################
+    # Exécuter le playbook de configuration HA sur tous les nœuds
+    ##############################################
+    try:
+        inventory_file_in_vm = os.path.basename(inventory_path)
+        config_cmd = (
+            f'vagrant ssh {namenode_lines[0].split()[0]} -c "cd /vagrant && {ansible_cmd_prefix}ansible-playbook -i {inventory_file_in_vm} hadoop_config.yml"'
+        )
+        subprocess.run(config_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error configuring HA Hadoop", "details": str(e)}), 500
+
+    ##############################################
+    # Exécuter le playbook de démarrage HA sur tous les nœuds
+    ##############################################
+    try:
+        start_cmd = (
+            f'vagrant ssh {namenode_lines[0].split()[0]} -c "cd /vagrant && {ansible_cmd_prefix}ansible-playbook -i {inventory_file_in_vm} hadoop_start_services.yml"'
+        )
+        subprocess.run(start_cmd, shell=True, cwd=cluster_folder, check=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": "Error starting HA Hadoop services", "details": str(e)}), 500
+
+    # Retourne une réponse de succès
+    return jsonify({
+        "message": f"Cluster HA with Spark '{cluster_data.get('clusterName')}' created successfully.",
+        "cluster_folder": cluster_folder,
+        "inventory_file": inventory_path,
+    }), 200
 
 
 if __name__ == '__main__':

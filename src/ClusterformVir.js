@@ -7,13 +7,14 @@ export default function ClusterFormVir() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  // Récupération des données globales du cluster depuis location.state ou valeurs par défaut
+  // Récupération des données du cluster depuis location.state ou valeurs par défaut
   const {
     clusterName = "Default Cluster",
     clusterDescription = "",
     nodeCount = 3,
-    clusterType = "default",
+    clusterType = { Ha: false, Spark: false, Classic: true },
     isHaSelected = false,
+    isSparkSelected = false,
   } = location.state || {};
 
   // États pour la gestion des boîtes personnalisées
@@ -45,7 +46,6 @@ export default function ClusterFormVir() {
     ip: "",
     nodeDescription: "",
     isNameNode: false,
-    // Les champs HA ne sont affichés et pris en compte que si isHaSelected est true
     isNameNodeStandby: isHaSelected ? false : undefined,
     isResourceManager: false,
     isResourceManagerStandby: isHaSelected ? false : undefined,
@@ -53,9 +53,11 @@ export default function ClusterFormVir() {
     isNodeManager: false,
     isZookeeper: isHaSelected ? false : undefined,
     isJournalNode: isHaSelected ? false : undefined,
+    // Champ pour Spark, initialisé à false
+    isSparkNode: false,
   });
 
-  // Index du nœud en cours (pour afficher "N node sur N")
+  // Index du nœud en cours (pour afficher "Node X sur Y")
   const [currentNodeIndex, setCurrentNodeIndex] = useState(0);
 
   // Synchronisation des options OS via localStorage
@@ -87,16 +89,13 @@ export default function ClusterFormVir() {
   // Soumettre les données du nœud courant
   const handleSubmit = (e) => {
     e.preventDefault();
-    // Vérifier que les champs obligatoires sont renseignés
     if (!currentNodeData.hostname || !currentNodeData.ip) {
       alert("Veuillez renseigner au moins le hostname et l'IP.");
       return;
     }
-    // Ajout du nœud courant au tableau nodeDetails
     setNodeDetails((prev) => [...prev, currentNodeData]);
-    // Réinitialiser le formulaire pour le prochain nœud
-    setCurrentNodeIndex((prev) => prev + 1);
     if (currentNodeIndex < nodeCount - 1) {
+      setCurrentNodeIndex((prev) => prev + 1);
       setCurrentNodeData({
         hostname: "",
         osVersion: osOptions[0] || "ubuntu/bionic64",
@@ -104,30 +103,36 @@ export default function ClusterFormVir() {
         cpu: 2,
         ip: "",
         nodeDescription: "",
-        isNameNode: currentNodeIndex === 0, // par exemple, le premier est actif
+        isNameNode: currentNodeIndex === 0,
         isNameNodeStandby: isHaSelected ? false : undefined,
-        isResourceManager: currentNodeIndex === 0, // par exemple, le premier RM est actif
+        isResourceManager: currentNodeIndex === 0,
         isResourceManagerStandby: isHaSelected ? false : undefined,
         isDataNode: true,
         isNodeManager: true,
         isZookeeper: isHaSelected ? false : undefined,
         isJournalNode: isHaSelected ? false : undefined,
+        isSparkNode: false,
       });
     } else {
-      // Dernier nœud, on soumet le cluster complet
       const clusterData = {
         clusterName,
         clusterDescription,
         nodeCount,
         clusterType,
         isHaSelected,
+        isSparkSelected,
         nodeDetails: [...nodeDetails, currentNodeData],
         customBoxes,
       };
 
-      const endpoint = isHaSelected
-        ? "http://localhost:5000/create_cluster_ha"
-        : "http://localhost:5000/create_cluster";
+      let endpoint = "";
+      if (isHaSelected) {
+        endpoint = isSparkSelected
+          ? "http://localhost:5000/create_cluster_ha_spark"
+          : "http://localhost:5000/create_cluster_ha";
+      } else {
+        endpoint = "http://localhost:5000/create_cluster";
+      }
 
       fetch(endpoint, {
         method: "POST",
@@ -170,8 +175,8 @@ export default function ClusterFormVir() {
           type="text"
           value={currentNodeData.hostname}
           onChange={(e) => handleFieldChange("hostname", e.target.value)}
-          className="w-full p-2 border rounded mb-4"
           placeholder="Enter host name"
+          className="w-full p-2 border rounded mb-4"
           required
         />
 
@@ -202,9 +207,7 @@ export default function ClusterFormVir() {
           max="16"
           step="2"
           value={currentNodeData.ram}
-          onChange={(e) =>
-            handleFieldChange("ram", Number(e.target.value))
-          }
+          onChange={(e) => handleFieldChange("ram", Number(e.target.value))}
           className="w-full mb-4"
         />
 
@@ -217,9 +220,7 @@ export default function ClusterFormVir() {
           max="8"
           step="1"
           value={currentNodeData.cpu}
-          onChange={(e) =>
-            handleFieldChange("cpu", Number(e.target.value))
-          }
+          onChange={(e) => handleFieldChange("cpu", Number(e.target.value))}
           className="w-full mb-4"
         />
 
@@ -228,8 +229,8 @@ export default function ClusterFormVir() {
           type="text"
           value={currentNodeData.ip}
           onChange={(e) => handleFieldChange("ip", e.target.value)}
-          className="w-full p-2 border rounded mb-4"
           placeholder="Enter IP address"
+          className="w-full p-2 border rounded mb-4"
           required
         />
 
@@ -239,11 +240,9 @@ export default function ClusterFormVir() {
         <input
           type="text"
           value={currentNodeData.nodeDescription}
-          onChange={(e) =>
-            handleFieldChange("nodeDescription", e.target.value)
-          }
-          className="w-full p-2 border rounded mb-4"
+          onChange={(e) => handleFieldChange("nodeDescription", e.target.value)}
           placeholder="Enter node description"
+          className="w-full p-2 border rounded mb-4"
         />
 
         <div className="mb-4">
@@ -251,9 +250,7 @@ export default function ClusterFormVir() {
             <input
               type="checkbox"
               checked={currentNodeData.isNameNode}
-              onChange={(e) =>
-                handleFieldChange("isNameNode", e.target.checked)
-              }
+              onChange={(e) => handleFieldChange("isNameNode", e.target.checked)}
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Name Node</span>
@@ -262,9 +259,7 @@ export default function ClusterFormVir() {
             <input
               type="checkbox"
               checked={currentNodeData.isResourceManager}
-              onChange={(e) =>
-                handleFieldChange("isResourceManager", e.target.checked)
-              }
+              onChange={(e) => handleFieldChange("isResourceManager", e.target.checked)}
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Resource Manager</span>
@@ -273,9 +268,7 @@ export default function ClusterFormVir() {
             <input
               type="checkbox"
               checked={currentNodeData.isDataNode}
-              onChange={(e) =>
-                handleFieldChange("isDataNode", e.target.checked)
-              }
+              onChange={(e) => handleFieldChange("isDataNode", e.target.checked)}
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Data Node</span>
@@ -288,9 +281,7 @@ export default function ClusterFormVir() {
               <input
                 type="checkbox"
                 checked={currentNodeData.isNameNodeStandby || false}
-                onChange={(e) =>
-                  handleFieldChange("isNameNodeStandby", e.target.checked)
-                }
+                onChange={(e) => handleFieldChange("isNameNodeStandby", e.target.checked)}
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">NameNode Standby</span>
@@ -299,9 +290,7 @@ export default function ClusterFormVir() {
               <input
                 type="checkbox"
                 checked={currentNodeData.isResourceManagerStandby || false}
-                onChange={(e) =>
-                  handleFieldChange("isResourceManagerStandby", e.target.checked)
-                }
+                onChange={(e) => handleFieldChange("isResourceManagerStandby", e.target.checked)}
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">Resource Manager Standby</span>
@@ -310,9 +299,7 @@ export default function ClusterFormVir() {
               <input
                 type="checkbox"
                 checked={currentNodeData.isZookeeper || false}
-                onChange={(e) =>
-                  handleFieldChange("isZookeeper", e.target.checked)
-                }
+                onChange={(e) => handleFieldChange("isZookeeper", e.target.checked)}
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">Zookeeper</span>
@@ -321,12 +308,24 @@ export default function ClusterFormVir() {
               <input
                 type="checkbox"
                 checked={currentNodeData.isJournalNode || false}
-                onChange={(e) =>
-                  handleFieldChange("isJournalNode", e.target.checked)
-                }
+                onChange={(e) => handleFieldChange("isJournalNode", e.target.checked)}
                 className="form-checkbox h-5 w-5 text-teal-600"
               />
               <span className="ml-2 text-gray-700">Journal Node</span>
+            </label>
+          </div>
+        )}
+
+        {isSparkSelected && (
+          <div className="mb-4">
+            <label className="inline-flex items-center">
+              <input
+                type="checkbox"
+                checked={currentNodeData.isSparkNode || false}
+                onChange={(e) => handleFieldChange("isSparkNode", e.target.checked)}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Spark Node</span>
             </label>
           </div>
         )}
@@ -335,7 +334,7 @@ export default function ClusterFormVir() {
           type="submit"
           className="w-full bg-teal-500 text-white p-2 rounded-lg shadow-md hover:bg-teal-600"
         >
-          {currentNodeIndex < nodeCount - 1 ? "Next" : "Submit Cluster"}
+          Submit Cluster
         </button>
       </form>
     </div>
