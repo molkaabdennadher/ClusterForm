@@ -1047,7 +1047,7 @@ def create_cluster():
     yarn_site_template = """<configuration>
   <property>
     <name>yarn.resourcemanager.hostname</name>
-    <value>{{ namenode_hostname }}</value>
+    <value>{{ groups['resourcemanager'][0] }}</value>
   </property>
 </configuration>
 """
@@ -3208,6 +3208,523 @@ def create_cluster_ha_spark():
         "inventory_file": inventory_path,
     }), 200
 
+##############################DISTANT MODE#####################################################
+###########################CLASSIC CLUSTER HADOOP##############################################
+import logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+@app.route("/create-cluster-remote", methods=["POST"])
+def create_cluster_remote():
+    """
+    Cet endpoint recrée l'intégralité de la logique de création d'un cluster Hadoop (comme dans /create_cluster)
+    sur une machine distante. Les étapes réalisées sont :
+      1. Récupération des données envoyées par le front-end.
+      2. Connexion SSH à la machine distante (avec tentative de fallback via PowerShell en cas d'échec).
+      3. Création du dossier du cluster sur la machine distante (dans "clusters/<clusterName>").
+      4. Écriture du Vagrantfile dans ce dossier, généré dynamiquement à partir des informations de chaque nœud.
+      5. Lancement de "vagrant up" dans ce dossier distant.
+      6. Génération de l’inventaire Ansible et écriture d’un fichier inventory.ini dans le dossier distant.
+      7. Installation d’Ansible sur le NameNode et configuration SSH entre les nœuds via commandes exécutées sur la machine distante.
+      8. Installation de Hadoop sur le NameNode, création et diffusion de l’archive Hadoop, et extraction sur les autres nœuds.
+      9. Installation de Java/net-tools et configuration des variables d’environnement sur chaque nœud.
+      10. Création des playbooks Ansible et des templates Jinja2 pour configurer Hadoop.
+      11. Exécution des playbooks via vagrant ssh sur le NameNode.
+      12. Copie (au moins) du Vagrantfile depuis le dossier distant vers la machine source.
+      13. Retour d’un JSON contenant les informations utiles.
+    """
+    try:
+        # 1. Récupération des données
+        cluster_data = request.get_json()
+        if not cluster_data:
+            return jsonify({"error": "No data received"}), 400
+        cluster_name = cluster_data.get("clusterName")
+        if not cluster_name:
+            return jsonify({"error": "Cluster name is required"}), 400
+        node_details = cluster_data.get("nodeDetails", [])
+        if not node_details:
+            return jsonify({"error": "nodeDetails is required"}), 400
+
+        # Paramètres de connexion distante
+        remote_ip = cluster_data.get("remote_ip")
+        remote_user = cluster_data.get("remote_user")
+        remote_password = cluster_data.get("remote_password")
+        remote_os = cluster_data.get("remote_os", "windows").lower()  # Par défaut Windows, modifiez si nécessaire
+        recipient_email = cluster_data.get("mail")  # Pour notification éventuelle
+
+        # 2. Connexion SSH avec fallback via PowerShell
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
+        except Exception as ssh_err:
+            print("Échec de la connexion SSH :", ssh_err)
+            print("Tentative de configuration SSH via PowerShell...")
+            client.connect(remote_ip, username=remote_user, password=remote_password)
+            client.exec_command('powershell -Command "Restart-Service sshd"')
+            client.close()
+            # Reconnexion
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
+        print("Connexion SSH établie avec la machine distante.")
+        sftp = client.open_sftp()
+
+
+
+        # 3. Création du dossier du cluster sur la machine distante
+        if remote_os == "windows":
+            home_dir = sftp.getcwd() or "."
+        else:
+            home_dir = f"/home/{remote_user}"
+            try:
+                sftp.chdir(home_dir)
+            except IOError:
+                sftp.mkdir(home_dir)
+                sftp.chdir(home_dir)
+        try:
+            sftp.chdir("clusters")
+        except IOError:
+            sftp.mkdir("clusters")
+            sftp.chdir("clusters")
+        try:
+            sftp.chdir(cluster_name)
+        except IOError:
+            sftp.mkdir(cluster_name)
+            sftp.chdir(cluster_name)
+        remote_cluster_folder = sftp.getcwd()
+        print("DEBUG - Dossier du cluster sur machine distante :", remote_cluster_folder)
+
+        # 4. Génération du Vagrantfile
+        vagrantfile_content = 'Vagrant.configure("2") do |config|\n'
+        
+        for node in node_details:
+            hostname = node.get("hostname")
+            os_version = node.get("osVersion", "ubuntu/bionic64")
+            ram = node.get("ram", 4)  # en GB
+            cpu = node.get("cpu", 2)
+            ip = node.get("ip")
+            ram_mb = int(ram * 1024)
+            print(os_version)
+            vagrantfile_content += f'''  config.vm.define "{hostname}" do |machine|
+    machine.vm.box = "{os_version}"
+    machine.vm.hostname = "{hostname}"
+    machine.vm.network "private_network", ip: "{ip}"
+    machine.vm.provider "virtualbox" do |vb|
+      vb.name = "{hostname}"
+      vb.memory = "{ram_mb}"
+      vb.cpus = {cpu} 
+    end
+
+    machine.vm.provision "shell", inline: <<-SHELL
+      echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+    SHELL
+  end
+'''
+       
+        vagrantfile_content += "end\n"
+        remote_vagrantfile_path = remote_cluster_folder + "/Vagrantfile"
+        with sftp.open(remote_vagrantfile_path, "w") as f:
+            f.write(vagrantfile_content)
+        print("DEBUG - Vagrantfile écrit sur la machine distante.")
+        # 5. Lancement des VMs via "vagrant up"
+        if remote_os == "windows":
+            folder = remote_cluster_folder.lstrip("/")
+            cmd_vagrant = f'cd /d "{folder}" && vagrant up'
+        else:
+            cmd_vagrant = f'cd "{remote_cluster_folder}" && vagrant up'
+        stdin, stdout, stderr = client.exec_command(cmd_vagrant)
+        out_vagrant = stdout.read().decode("utf-8", errors="replace")
+        err_vagrant = stderr.read().decode("utf-8", errors="replace")
+        if err_vagrant.strip():
+            sftp.close()
+            client.close()
+            return jsonify({"error": "Error during 'vagrant up'", "details": err_vagrant}), 500
+        print("DEBUG - vagrant up exécuté :", out_vagrant)
+
+        # 6. Génération de l'inventaire Ansible
+        inventory_lines = []
+        namenode_lines = []
+        resourcemanager_lines = []
+        datanodes_lines = []
+        nodemanagers_lines = []
+        for node in node_details:
+            hostname = node.get("hostname")
+            ip = node.get("ip")
+            if node.get("isNameNode"):
+                namenode_lines.append(f"{hostname} ansible_host={ip}")
+            if node.get("isResourceManager"):
+                resourcemanager_lines.append(f"{hostname} ansible_host={ip}")
+            if node.get("isDataNode"):
+                datanodes_lines.append(f"{hostname} ansible_host={ip}")
+                nodemanagers_lines.append(f"{hostname} ansible_host={ip}")
+        if namenode_lines:
+            inventory_lines.append("[namenode]")
+            inventory_lines.extend(namenode_lines)
+        if resourcemanager_lines:
+            inventory_lines.append("[resourcemanager]")
+            inventory_lines.extend(resourcemanager_lines)
+        if datanodes_lines:
+            inventory_lines.append("[datanodes]")
+            inventory_lines.extend(datanodes_lines)
+        if nodemanagers_lines:
+            inventory_lines.append("[nodemanagers]")
+            inventory_lines.extend(nodemanagers_lines)
+        global_vars = ("[all:vars]\n"
+                       "ansible_user=vagrant\n"
+                       "ansible_python_interpreter=/usr/bin/python3\n"
+                       "ansible_ssh_common_args='-o StrictHostKeyChecking=no'\n\n")
+        inventory_content = global_vars + "\n".join(inventory_lines)
+        remote_inventory_path = remote_cluster_folder + "/inventory.ini"
+        with sftp.open(remote_inventory_path, "w") as f:
+            f.write(inventory_content)
+        print("DEBUG - Inventaire Ansible écrit sur la machine distante.")
+
+        # 7. Installation d'Ansible sur le NameNode et configuration SSH entre les nœuds
+        # Trouver le NameNode
+        namenode = None
+        for node in node_details:
+            if node.get("isNameNode"):
+                namenode = node
+                break
+        if not namenode:
+            return jsonify({"error": "No NameNode defined"}), 400
+        namenode_hostname = namenode.get("hostname")
+# 7. Vérification/Installation d'Ansible sur le NameNode
+# Trouver le NameNode
+        namenode = None
+        for node in node_details:
+            if node.get("isNameNode"):
+                namenode = node
+                break
+        if not namenode:
+            return jsonify({"error": "No NameNode defined"}), 400
+
+        namenode_hostname = namenode.get("hostname")
+        namenode_ip = namenode.get("ip")
+        print("DEBUG - IP du NameNode :", namenode_ip)
+
+        # Connexion SSH vers le NameNode en utilisant le mot de passe (remote_password)
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            ssh.connect(namenode_ip, username='vagrant', password="vagrant")
+        except Exception as e:
+            return jsonify({"error": "Échec de la connexion SSH sur le NameNode", "details": str(e)}), 500
+        print("conx etablie")
+        # Vérification de l'installation d'Ansible sur le NameNode
+        stdin, stdout, stderr = ssh.exec_command("which ansible || echo 'not-installed'")
+        result = stdout.read().decode()
+        if 'not-installed' in result:
+            install_cmd = (
+                "sudo apt-get update && "
+                "sudo apt install -y software-properties-common && "
+                "sudo apt install -y ansible"
+            )
+            stdin, stdout, stderr = ssh.exec_command(install_cmd, timeout=200)
+            exit_status = stderr.channel.recv_exit_status()
+            print(stdout, stderr)
+            print("ansible installe")
+            if exit_status != 0:
+                error_details = {
+                        "stdout": stdout.read().decode().strip(),
+                        "stderr": stderr.read().decode().strip(),
+                        "exit_code": exit_status
+                }
+                ssh.close()
+                logging.error(f"Échec Ansible - Détails : {error_details}")
+                return jsonify({"error": "Échec installation Ansible", "details": error_details}), 500
+            else:
+                print("DEBUG - Ansible installé avec succès sur le NameNode.")
+        else:
+            print("DEBUG - Ansible est déjà installé sur le NameNode.")
+
+        ssh.close()
+
+        # b) Configuration SSH pour le NameNode : génération et récupération de la clé
+        try:
+            status_cmd = f'cd "{remote_cluster_folder}" && vagrant status {namenode_hostname}'
+            stdin, stdout, stderr = client.exec_command(status_cmd)
+            if "running" not in stdout.read().decode().lower():
+                raise Exception(f"Machine {namenode_hostname} non démarrée")
+            gen_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && ssh-keygen -t rsa -N \\"\\" -f ~/.ssh/id_rsa"'
+            stdin, stdout, stderr = client.exec_command(gen_key_cmd, timeout=30)
+            # Attendre quelques secondes pour que la clé soit générée
+            time.sleep(5)
+            get_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+            stdin, stdout, stderr = client.exec_command(get_key_cmd, timeout=15)
+            namenode_public_key = stdout.read().decode("utf-8", errors="replace").strip()
+            if not namenode_public_key:
+                raise ValueError("Aucune clé publique récupérée")
+            print("DEBUG - Public key du NameNode :", namenode_public_key)
+        except Exception as e:
+            return jsonify({"error": f"Échec configuration SSH sur NameNode: {str(e)}"}), 500
+
+        # Configuration SSH pour les autres nœuds
+        for node in node_details:
+            node_hostname = node.get("hostname")
+            if node_hostname != namenode_hostname:
+                try:
+                    gen_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+                    stdin, stdout, stderr = client.exec_command(gen_key_cmd)
+                    time.sleep(3)
+                    get_pubkey_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+                    stdin, stdout, stderr = client.exec_command(get_pubkey_cmd)
+                    node_public_key = stdout.read().decode("utf-8", errors="replace").strip()
+                    print(f"DEBUG - Public key du nœud {node_hostname} récupérée :", node_public_key)
+                    safe_node_public_key = shlex.quote(node_public_key)
+                    add_self_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    client.exec_command(add_self_key_cmd)
+                    add_namenode_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && grep -q {shlex.quote(namenode_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(namenode_public_key)} >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    client.exec_command(add_namenode_key_cmd)
+                    add_node_key_to_namenode_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    client.exec_command(add_node_key_to_namenode_cmd)
+                except Exception as e:
+                    return jsonify({"error": f"Error configuring SSH for node {node_hostname}", "details": str(e)}), 500
+
+        # 8. Installation de Hadoop sur le NameNode et mise à jour de l'archive dans le dossier partagé
+        check_archive_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "test -f /vagrant/hadoop.tar.gz"'
+        stdin, stdout, stderr = client.exec_command(check_archive_cmd)
+        if stdout.channel.recv_exit_status() != 0:
+            hadoop_install_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y wget && wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && test -s /tmp/hadoop.tar.gz && sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && sudo mv /opt/hadoop-3.3.1 /opt/hadoop && rm /tmp/hadoop.tar.gz"'
+            client.exec_command(hadoop_install_cmd)
+            tar_hadoop_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
+            client.exec_command(tar_hadoop_cmd)
+            copy_to_shared_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo cp /tmp/hadoop.tar.gz /vagrant/hadoop.tar.gz"'
+            client.exec_command(copy_to_shared_cmd)
+        else:
+            extract_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+            client.exec_command(extract_cmd)
+
+        # 9. Copier l'archive Hadoop vers les autres nœuds
+        for node in node_details:
+            if node.get("hostname") != namenode_hostname:
+                target_hostname = node.get("hostname")
+                copy_hadoop_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+                client.exec_command(copy_hadoop_cmd)
+
+        # 10. Installer Java, net-tools et configurer l'environnement sur tous les nœuds
+        for node in node_details:
+            target_hostname = node.get("hostname")
+            install_java_net_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
+            client.exec_command(install_java_net_cmd)
+            configure_env_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
+            client.exec_command(configure_env_cmd)
+
+        # 11. Création des playbooks Ansible et templates Jinja2 pour la configuration Hadoop
+        remote_templates_dir = remote_cluster_folder + "/templates"
+        try:
+            sftp.chdir(remote_templates_dir)
+        except IOError:
+            sftp.mkdir("templates")
+        # core-site.xml.j2
+        with sftp.open(remote_templates_dir + "/core-site.xml.j2", "w") as f:
+            f.write("""<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://{{ namenode_hostname }}:9000</value>
+  </property>
+</configuration>
+""")
+        # hdfs-site.xml.j2
+        with sftp.open(remote_templates_dir + "/hdfs-site.xml.j2", "w") as f:
+            f.write("""<configuration>
+  <property>
+    <name>dfs.replication</name>
+    <value>2</value>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address</name>
+    <value>{{ namenode_hostname }}:9870</value>
+  </property>
+</configuration>
+""")
+        # yarn-site.xml.j2
+        with sftp.open(remote_templates_dir + "/yarn-site.xml.j2", "w") as f:
+            f.write("""<configuration>
+  <property>
+    <name>yarn.resourcemanager.hostname</name>
+    <value>{{ groups['resourcemanager'][0] }}</value>
+  </property>
+</configuration>
+""")
+        # mapred-site.xml.j2
+        with sftp.open(remote_templates_dir + "/mapred-site.xml.j2", "w") as f:
+            f.write("""<configuration>
+  <property>
+    <name>mapreduce.framework.name</name>
+    <value>yarn</value>
+  </property>
+</configuration>
+""")
+        # masters.j2
+        with sftp.open(remote_templates_dir + "/masters.j2", "w") as f:
+            f.write("{{ groups['namenode'][0] }}\n")
+        # workers.j2
+        with sftp.open(remote_templates_dir + "/workers.j2", "w") as f:
+            f.write("""{% for worker in groups['datanodes'] %}
+{{ worker }}
+{% endfor %}
+""")
+        # hosts.j2
+        with sftp.open(remote_templates_dir + "/hosts.j2", "w") as f:
+            f.write("""# ANSIBLE GENERATED CLUSTER HOSTS
+{% for host in groups['all'] %}
+{{ hostvars[host]['ansible_host'] }} {{ host }}
+{% endfor %}
+""")
+        remote_config_playbook = remote_cluster_folder + "/hadoop_config.yml"
+        with sftp.open(remote_config_playbook, "w") as f:
+            f.write("""---
+- name: Configurer les fichiers de configuration Hadoop et /etc/hosts
+  hosts: all
+  become: yes
+  vars:
+    namenode_hostname: "{{ groups['namenode'][0] }}"
+  tasks:
+    - name: Déployer core-site.xml
+      template:
+        src: templates/core-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/core-site.xml
+    - name: Déployer hdfs-site.xml
+      template:
+        src: templates/hdfs-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/hdfs-site.xml
+    - name: Déployer yarn-site.xml
+      template:
+        src: templates/yarn-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/yarn-site.xml
+    - name: Déployer mapred-site.xml
+      template:
+        src: templates/mapred-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/mapred-site.xml
+    - name: Déployer le fichier masters
+      template:
+        src: templates/masters.j2
+        dest: /opt/hadoop/etc/hadoop/masters
+    - name: Déployer le fichier workers
+      template:
+        src: templates/workers.j2
+        dest: /opt/hadoop/etc/hadoop/workers
+    - name: Mettre à jour /etc/hosts
+      template:
+        src: templates/hosts.j2
+        dest: /etc/hosts
+""")
+        remote_start_playbook = remote_cluster_folder + "/hadoop_start_services.yml"
+        with sftp.open(remote_start_playbook, "w") as f:
+            f.write("""---
+- name: Démarrer les services Hadoop
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Mettre à jour hadoop-env.sh pour définir JAVA_HOME
+      shell: |
+        if grep -q '^export JAVA_HOME=' /opt/hadoop/etc/hadoop/hadoop-env.sh; then
+          sed -i 's|^export JAVA_HOME=.*|export JAVA_HOME=/usr/lib/jvm/default-java|' /opt/hadoop/etc/hadoop/hadoop-env.sh;
+        else
+          echo 'export JAVA_HOME=/usr/lib/jvm/default-java' >> /opt/hadoop/etc/hadoop/hadoop-env.sh;
+        fi
+      args:
+        executable: /bin/bash
+    - name: Créer /opt/hadoop/logs si nécessaire
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+    - name: Formater le NameNode (si nécessaire)
+      shell: "/opt/hadoop/bin/hdfs namenode -format -force"
+      args:
+        creates: /opt/hadoop/hdfs/name/current/VERSION
+      become_user: vagrant
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+      executable: /bin/bash
+    - name: Démarrer HDFS
+      shell: "/opt/hadoop/sbin/start-dfs.sh"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+      executable: /bin/bash
+- name: Démarrer le ResourceManager
+  hosts: resourcemanager
+  become: yes
+  tasks:
+    - name: Démarrer YARN
+      shell: "/opt/hadoop/sbin/start-yarn.sh"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+      executable: /bin/bash
+    - name: Démarrer explicitement le ResourceManager
+      shell: "nohup /opt/hadoop/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
+      become_user: vagrant
+      environment:
+        JAVA_HOME: /usr/lib/jvm/default-java
+      executable: /bin/bash
+    - name: Pause pour démarrer
+      pause:
+        seconds: 10
+    - name: Vérifier les services Hadoop (jps)
+      shell: "jps"
+      register: jps_output
+      become_user: vagrant
+      executable: /bin/bash
+    - name: Afficher les processus Hadoop
+      debug:
+        var: jps_output.stdout
+""")
+        # 12. Exécution des playbooks via vagrant ssh sur le NameNode
+        inventory_filename = remote_inventory_path.split("/")[-1]
+        config_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "ansible-playbook -i {inventory_filename} hadoop_config.yml"'
+        stdin, stdout, stderr = client.exec_command(config_cmd)
+        out_config = stdout.read().decode("utf-8", errors="replace")
+        err_config = stderr.read().decode("utf-8", errors="replace")
+        if err_config.strip():
+            return jsonify({"error": "Error configuring Hadoop", "details": err_config}), 500
+        start_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "ansible-playbook -i {inventory_filename} hadoop_start_services.yml"'
+        stdin, stdout, stderr = client.exec_command(start_cmd)
+        out_start = stdout.read().decode("utf-8", errors="replace")
+        err_start = stderr.read().decode("utf-8", errors="replace")
+        if err_start.strip():
+            return jsonify({"error": "Error starting Hadoop services", "details": err_start}), 500
+
+  # -------------------- 12. Copie du dossier du cluster depuis la machine distante vers la machine source --------------------
+        local_cluster_local_folder = os.path.join("clusters_local", cluster_name)
+        if not os.path.exists(local_cluster_local_folder):
+            os.makedirs(local_cluster_local_folder)
+        # Ici, on copie au moins le Vagrantfile (vous pouvez étendre à d'autres fichiers)
+        local_vagrantfile_path = os.path.join(local_cluster_local_folder, "Vagrantfile")
+        with sftp.open(remote_vagrantfile_path, "rb") as remote_vf:
+            vagrant_data = remote_vf.read()
+        with open(local_vagrantfile_path, "wb") as local_vf:
+            local_vf.write(vagrant_data)
+        print("DEBUG - Vagrantfile copié localement :", local_vagrantfile_path)
+
+        # 13. Fermeture des connexions
+        sftp.close()
+        client.close()
+
+        # Préparation de la réponse
+        cluster_details = {
+            "message": f"Cluster '{cluster_name}' created remotely with full configuration",
+            "remote_cluster_folder": remote_cluster_folder,
+            "vagrant_up_output": out_vagrant,
+            "local_vagrantfile": os.path.abspath(local_vagrantfile_path)
+        }
+        # (Optionnel) Envoi d'email avec les infos du cluster via votre fonction send_email_with_cluster_credentials
+        # if recipient_email:
+        #     send_email_with_cluster_credentials(recipient_email, cluster_details)
+
+        return jsonify(cluster_details), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

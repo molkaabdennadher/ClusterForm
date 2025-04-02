@@ -43,13 +43,13 @@ export default function ClusterFormVir() {
     osVersion: osOptions[0] || "ubuntu/bionic64",
     ram: 4,
     cpu: 2,
-    ip: "",
+    ip: "192.168.56.4",
     nodeDescription: "",
-    isNameNode: false,
+    isNameNode: true,
     isNameNodeStandby: isHaSelected ? false : undefined,
-    isResourceManager: false,
+    isResourceManager: true,
     isResourceManagerStandby: isHaSelected ? false : undefined,
-    isDataNode: false,
+    isDataNode: true,
     isNodeManager: false,
     isZookeeper: isHaSelected ? false : undefined,
     isJournalNode: isHaSelected ? false : undefined,
@@ -123,6 +123,9 @@ export default function ClusterFormVir() {
         isSparkSelected,
         nodeDetails: [...nodeDetails, currentNodeData],
         customBoxes,
+        remote_ip: "192.168.0.27",
+        remote_user: "User",
+        remote_password: "amiria123"
       };
 
       let endpoint = "";
@@ -131,7 +134,7 @@ export default function ClusterFormVir() {
           ? "http://localhost:5000/create_cluster_ha_spark"
           : "http://localhost:5000/create_cluster_ha";
       } else {
-        endpoint = "http://localhost:5000/create_cluster";
+        endpoint = "http://localhost:5000/create-cluster-remote";
       }
 
       fetch(endpoint, {

@@ -1,9 +1,0 @@
-Vagrant.configure("2") do |config|
-  config.vm.box = "ubuntu/trusty64"
-  config.vm.hostname = "mail"
-  config.vm.provider "virtualbox" do |vb|
-    vb.name = "mail"
-    vb.memory = "2048"
-    vb.cpus = 1
-  end
-end
