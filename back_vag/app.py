@@ -1,4 +1,6 @@
 
+from datetime import datetime
+import hashlib
 import textwrap
 import time
 from flask import Flask, request, jsonify, render_template
@@ -3271,9 +3273,6 @@ def create_cluster_remote():
             client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
         print("Connexion SSH établie avec la machine distante.")
         sftp = client.open_sftp()
-
-
-
         # 3. Création du dossier du cluster sur la machine distante
         if remote_os == "windows":
             home_dir = sftp.getcwd() or "."
@@ -3445,45 +3444,147 @@ def create_cluster_remote():
 
         # b) Configuration SSH pour le NameNode : génération et récupération de la clé
         try:
-            status_cmd = f'cd "{remote_cluster_folder}" && vagrant status {namenode_hostname}'
-            stdin, stdout, stderr = client.exec_command(status_cmd)
-            if "running" not in stdout.read().decode().lower():
-                raise Exception(f"Machine {namenode_hostname} non démarrée")
-            gen_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && ssh-keygen -t rsa -N \\"\\" -f ~/.ssh/id_rsa"'
-            stdin, stdout, stderr = client.exec_command(gen_key_cmd, timeout=30)
-            # Attendre quelques secondes pour que la clé soit générée
-            time.sleep(5)
-            get_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "cat ~/.ssh/id_rsa.pub"'
-            stdin, stdout, stderr = client.exec_command(get_key_cmd, timeout=15)
-            namenode_public_key = stdout.read().decode("utf-8", errors="replace").strip()
-            if not namenode_public_key:
-                raise ValueError("Aucune clé publique récupérée")
-            print("DEBUG - Public key du NameNode :", namenode_public_key)
-        except Exception as e:
-            return jsonify({"error": f"Échec configuration SSH sur NameNode: {str(e)}"}), 500
+            # 1. Connexion SSH au NameNode
+            app.logger.info("Tentative de connexion SSH à %s (%s)", namenode_hostname, namenode_ip)
+            nn_ssh = paramiko.SSHClient()
+            nn_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            try:
+                nn_ssh.connect(namenode_ip, username='vagrant', password="vagrant")
+                app.logger.debug("Connexion SSH établie - Version transport : %s", 
+                                nn_ssh.get_transport().get_security_options().kex)
+            except paramiko.SSHException as ssh_ex:
+                app.logger.error("Échec connexion SSH - Détails : %s", str(ssh_ex), exc_info=True)
+                raise
 
-        # Configuration SSH pour les autres nœuds
+            # 2. Génération clé SSH
+            app.logger.info("Génération des clés SSH sur %s", namenode_hostname)
+            gen_key_cmd = 'mkdir -p ~/.ssh && ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa -q'
+            stdin, stdout, stderr = nn_ssh.exec_command(gen_key_cmd, timeout=30)
+            
+            exit_status = stdout.channel.recv_exit_status()
+            # Correction décodage
+            gen_key_output = stdout.read().decode('utf-8', errors='replace').strip()
+            gen_key_errors = stderr.read().decode('utf-8', errors='replace')
+            
+            app.logger.debug("Sortie génération clé - Code:%d | Sortie:%s | Erreurs:%s", 
+                            exit_status, gen_key_output, gen_key_errors)
+            
+            if exit_status != 0:
+                app.logger.error("Échec génération clé SSH - Code sortie:%d | Erreurs:%s", 
+                                exit_status, gen_key_errors)
+                raise Exception("Échec lors de la génération des clés SSH")
+
+            # 4. Récupération clé publique
+            app.logger.info("Récupération clé publique sur %s", namenode_hostname)
+            get_key_cmd = 'cat ~/.ssh/id_rsa.pub 2>&1'
+            stdin, stdout, stderr = nn_ssh.exec_command(get_key_cmd, timeout=15)
+            
+            # Correction décodage
+            namenode_public_key = stdout.read().decode('utf-8', errors='replace').strip()
+            key_retrieval_errors = stderr.read().decode('utf-8', errors='replace')
+            
+            app.logger.debug("Clé brute récupérée : %s", namenode_public_key[:80] + "...")
+            
+            if not namenode_public_key.startswith("ssh-rsa"):
+                app.logger.error("Format clé invalide - Début clé:%s | Erreurs:%s", 
+                                namenode_public_key[:50], key_retrieval_errors)
+                raise ValueError("Clé publique corrompue ou vide")
+            
+            app.logger.info("Clé publique validée avec succès (empreinte : %s)", 
+                        hashlib.sha256(namenode_public_key.encode()).hexdigest()[:12])
+
+        except Exception as e:
+            app.logger.exception("ERREUR CRITIQUE dans configuration SSH - Type: %s | Détails: %s", 
+                                type(e).__name__, str(e))
+            return jsonify({
+                "error": f"Échec configuration SSH sur NameNode: {str(e)}",
+                "technical_details": {
+                    "timestamp": datetime.utcnow().isoformat(),  # Nécessite 'from datetime import datetime'
+                    "component": "ssh_keygen",
+                    "error_type": type(e).__name__
+                }
+            }), 500
+
+        finally:
+            if 'nn_ssh' in locals():
+                nn_ssh.close()
+                app.logger.debug("Connexion SSH fermée proprement")
+        # C-Configuration SSH pour les autres nœuds
         for node in node_details:
             node_hostname = node.get("hostname")
-            if node_hostname != namenode_hostname:
-                try:
-                    gen_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
-                    stdin, stdout, stderr = client.exec_command(gen_key_cmd)
-                    time.sleep(3)
-                    get_pubkey_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "cat ~/.ssh/id_rsa.pub"'
-                    stdin, stdout, stderr = client.exec_command(get_pubkey_cmd)
-                    node_public_key = stdout.read().decode("utf-8", errors="replace").strip()
-                    print(f"DEBUG - Public key du nœud {node_hostname} récupérée :", node_public_key)
-                    safe_node_public_key = shlex.quote(node_public_key)
-                    add_self_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
-                    client.exec_command(add_self_key_cmd)
-                    add_namenode_key_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && grep -q {shlex.quote(namenode_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(namenode_public_key)} >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
-                    client.exec_command(add_namenode_key_cmd)
-                    add_node_key_to_namenode_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
-                    client.exec_command(add_node_key_to_namenode_cmd)
-                except Exception as e:
-                    return jsonify({"error": f"Error configuring SSH for node {node_hostname}", "details": str(e)}), 500
+            node_ip = node.get("ip")
+            
+            if node_hostname == namenode_hostname:
+                continue  # Passer le NameNode déjà configuré
 
+            ssh_node = None
+            try:
+                # 1. Connexion SSH au nœud
+                ssh_node = paramiko.SSHClient()
+                ssh_node.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh_node.connect(namenode_ip, username='vagrant', password="vagrant")
+                app.logger.info(f"Connexion établie avec {node_hostname} ({node_ip})")
+
+                # 2. Génération des clés SSH
+                gen_key_cmd = '''
+                    [ -f ~/.ssh/id_rsa.pub ] || 
+                    ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa -q
+                '''
+                stdin, stdout, stderr = ssh_node.exec_command(gen_key_cmd)
+                if stdout.channel.recv_exit_status() != 0:
+                    raise Exception("Échec génération clé SSH : " + stderr.read().decode())
+
+                # 3. Récupération clé publique
+                stdin, stdout, stderr = ssh_node.exec_command("cat ~/.ssh/id_rsa.pub")
+                node_pubkey = stdout.read().decode('utf-8', 'replace').strip()
+                if not node_pubkey.startswith('ssh-rsa'):
+                    raise ValueError("Format de clé invalide")
+
+                # 4. Configuration autorized_keys
+                cmds = [
+                    # Sur le nœud courant
+                    f"echo {shlex.quote(node_pubkey)} >> ~/.ssh/authorized_keys",
+                    f"echo {shlex.quote(namenode_public_key)} >> ~/.ssh/authorized_keys",
+                    
+                    # Sur le NameNode
+                    f"echo {shlex.quote(node_pubkey)} >> ~/.ssh/authorized_keys"
+                ]
+
+                # Exécution sur le nœud
+                for cmd in cmds[:2]:
+                    stdin, stdout, stderr = ssh_node.exec_command(f"mkdir -p ~/.ssh && {cmd}")
+                    if stdout.channel.recv_exit_status() != 0:
+                        raise Exception(f"Échec configuration : {stderr.read().decode()}")
+
+                # Exécution sur le NameNode
+                stdin, stdout, stderr = nn_ssh.exec_command(f"mkdir -p ~/.ssh && {cmds[2]}")
+                if stdout.channel.recv_exit_status() != 0:
+                    raise Exception(f"Échec configuration NameNode : {stderr.read().decode()}")
+
+                # 5. Vérification finale
+                verify_cmd = "ssh -o StrictHostKeyChecking=no {} hostname".format(namenode_ip)
+                stdin, stdout, stderr = ssh_node.exec_command(verify_cmd, timeout=10)
+                if stdout.channel.recv_exit_status() != 0:
+                    raise Exception("Échec connexion SSH inversée : " + stderr.read().decode())
+
+                app.logger.info(f"Configuration SSH réussie pour {node_hostname}")
+
+            except Exception as e:
+                app.logger.error(f"ERREUR sur {node_hostname}", exc_info=True)
+                return jsonify({
+                    "error": f"Échec configuration SSH pour {node_hostname}",
+                    "details": str(e),
+                    "node_ip": node_ip,
+                    "logs": {
+                        "pubkey": node_pubkey[:100] + "..." if node_pubkey else None,
+                        "last_command": cmd if 'cmd' in locals() else None
+                    }
+                }), 500
+
+            finally:
+                if ssh_node:
+                    ssh_node.close()
         # 8. Installation de Hadoop sur le NameNode et mise à jour de l'archive dans le dossier partagé
         check_archive_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "test -f /vagrant/hadoop.tar.gz"'
         stdin, stdout, stderr = client.exec_command(check_archive_cmd)
