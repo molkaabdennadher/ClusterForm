@@ -3260,6 +3260,7 @@ def create_cluster_remote():
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
+            print(remote_ip,remote_user,remote_password)
             client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
         except Exception as ssh_err:
             print("Échec de la connexion SSH :", ssh_err)
@@ -3405,7 +3406,7 @@ def create_cluster_remote():
         namenode_ip = namenode.get("ip")
         print("DEBUG - IP du NameNode :", namenode_ip)
 
-        # Connexion SSH vers le NameNode en utilisant le mot de passe (remote_password)
+# Connexion SSH vers le NameNode en utilisant le mot de passe (remote_password)
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
@@ -3511,9 +3512,15 @@ def create_cluster_remote():
                 nn_ssh.close()
                 app.logger.debug("Connexion SSH fermée proprement")
         # C-Configuration SSH pour les autres nœuds
+        
+            nn_ssh.connect(namenode_ip, username='vagrant', password="vagrant")
+            app.logger.debug("Connexion SSH établie 2 avec namenode - Version transport : %s", 
+                            nn_ssh.get_transport().get_security_options().kex)
+      
         for node in node_details:
             node_hostname = node.get("hostname")
             node_ip = node.get("ip")
+            print(node_ip)
             
             if node_hostname == namenode_hostname:
                 continue  # Passer le NameNode déjà configuré
@@ -3523,9 +3530,9 @@ def create_cluster_remote():
                 # 1. Connexion SSH au nœud
                 ssh_node = paramiko.SSHClient()
                 ssh_node.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh_node.connect(namenode_ip, username='vagrant', password="vagrant")
+                ssh_node.connect(node_ip, username='vagrant', password="vagrant")
                 app.logger.info(f"Connexion établie avec {node_hostname} ({node_ip})")
-
+                print("Connexion établie avec {node_hostname} ({node_ip})")
                 # 2. Génération des clés SSH
                 gen_key_cmd = '''
                     [ -f ~/.ssh/id_rsa.pub ] || 
@@ -3569,6 +3576,7 @@ def create_cluster_remote():
                     raise Exception("Échec connexion SSH inversée : " + stderr.read().decode())
 
                 app.logger.info(f"Configuration SSH réussie pour {node_hostname}")
+                print(" ssh terminée")
 
             except Exception as e:
                 app.logger.error(f"ERREUR sur {node_hostname}", exc_info=True)
@@ -3586,6 +3594,7 @@ def create_cluster_remote():
                 if ssh_node:
                     ssh_node.close()
         # 8. Installation de Hadoop sur le NameNode et mise à jour de l'archive dans le dossier partagé
+       
         check_archive_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "test -f /vagrant/hadoop.tar.gz"'
         stdin, stdout, stderr = client.exec_command(check_archive_cmd)
         if stdout.channel.recv_exit_status() != 0:
@@ -3600,6 +3609,7 @@ def create_cluster_remote():
             client.exec_command(extract_cmd)
 
         # 9. Copier l'archive Hadoop vers les autres nœuds
+
         for node in node_details:
             if node.get("hostname") != namenode_hostname:
                 target_hostname = node.get("hostname")
@@ -3607,6 +3617,7 @@ def create_cluster_remote():
                 client.exec_command(copy_hadoop_cmd)
 
         # 10. Installer Java, net-tools et configurer l'environnement sur tous les nœuds
+        
         for node in node_details:
             target_hostname = node.get("hostname")
             install_java_net_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
@@ -3819,7 +3830,7 @@ def create_cluster_remote():
         }
         # (Optionnel) Envoi d'email avec les infos du cluster via votre fonction send_email_with_cluster_credentials
         # if recipient_email:
-        #     send_email_with_cluster_credentials(recipient_email, cluster_details)
+        # send_email_with_cluster_credentials(recipient_email, cluster_details)
 
         return jsonify(cluster_details), 200
 
