@@ -3595,28 +3595,126 @@ def create_cluster_remote():
                     ssh_node.close()
         # 8. Installation de Hadoop sur le NameNode et mise à jour de l'archive dans le dossier partagé
        
-        check_archive_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "test -f /vagrant/hadoop.tar.gz"'
-        stdin, stdout, stderr = client.exec_command(check_archive_cmd)
-        if stdout.channel.recv_exit_status() != 0:
-            hadoop_install_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y wget && wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && test -s /tmp/hadoop.tar.gz && sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && sudo mv /opt/hadoop-3.3.1 /opt/hadoop && rm /tmp/hadoop.tar.gz"'
-            client.exec_command(hadoop_install_cmd)
-            tar_hadoop_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
-            client.exec_command(tar_hadoop_cmd)
-            copy_to_shared_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo cp /tmp/hadoop.tar.gz /vagrant/hadoop.tar.gz"'
-            client.exec_command(copy_to_shared_cmd)
-        else:
-            extract_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
-            client.exec_command(extract_cmd)
+# 8. Installation de Hadoop sur le NameNode
+        namenode_ssh = None
+        try:
+            # Connexion SSH directe au NameNode
+            namenode_ssh = paramiko.SSHClient()
+            namenode_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Configuration avec timeout et keepalive
+            namenode_ssh.connect(
+                namenode_ip,
+                username='vagrant',
+                password='vagrant',
+                timeout=20,
+                banner_timeout=40
+            )
+            
+            # Activer le keepalive
+            transport = namenode_ssh.get_transport()
+            transport.set_keepalive(30)
 
-        # 9. Copier l'archive Hadoop vers les autres nœuds
+            # Vérifier si l'archive existe
+            stdin, stdout, stderr = namenode_ssh.exec_command('[ -f /vagrant/hadoop.tar.gz ] && echo "exists"')
+            archive_exists = "exists" in stdout.read().decode()
+            print(stdout, archive_exists)
 
-        for node in node_details:
-            if node.get("hostname") != namenode_hostname:
-                target_hostname = node.get("hostname")
-                copy_hadoop_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
-                client.exec_command(copy_hadoop_cmd)
+            if not archive_exists:
+                # Téléchargement et installation
+                commands = [
+                    'sudo apt-get update -qq',
+                    'sudo apt-get install -y wget',
+                    'wget -q -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz',
+                    'sudo tar -xzf /tmp/hadoop.tar.gz -C /opt',
+                    'sudo mv /opt/hadoop-3.3.1 /opt/hadoop',
+                    'sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop',
+                    'sudo cp /tmp/hadoop.tar.gz /vagrant/'
+                ]
 
-        # 10. Installer Java, net-tools et configurer l'environnement sur tous les nœuds
+                for cmd in commands:
+                    app.logger.info(f"Exécution: {cmd[:60]}...")  # Log partiel pour éviter le spam
+                    stdin, stdout, stderr = namenode_ssh.exec_command(cmd, timeout=300)
+                    
+                    # Attendre la fin de l'exécution
+                    exit_status = stdout.channel.recv_exit_status()
+                    if exit_status != 0:
+                        error = stderr.read().decode('utf-8', 'replace')
+                        raise Exception(f"Échec commande '{cmd}': {error}")
+                print("fin d'execution de la commande de creation!")
+
+            # Extraction de l'archive (toujours nécessaire)
+            extract_cmd = 'sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt'
+            stdin, stdout, stderr = namenode_ssh.exec_command(extract_cmd, timeout=600)
+            print("extracté")
+            # Vérification finale
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                error = stderr.read().decode('utf-8', 'replace')
+                raise Exception(f"Échec extraction Hadoop: {error}")
+
+
+
+# 9. Copier l'archive Hadoop vers les autres nœuds
+            for node in node_details:
+                node_hostname = node.get("hostname")
+                node_ip = node.get("ip")
+                
+                if node_hostname == namenode_hostname:
+                    continue
+
+                ssh_node = None
+                try:
+                    # Connexion SSH au nœud cible
+                    ssh_node = paramiko.SSHClient()
+                    ssh_node.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh_node.connect(
+                        node_ip,
+                        username='vagrant',
+                        password='vagrant',
+                        timeout=15,
+                        banner_timeout=30
+                    )
+                    
+                    # Commandes d'installation
+                    install_commands = [
+                        'sudo apt-get update -qq',
+                        'sudo rm -rf /opt/hadoop',
+                        'sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt'
+                    ]
+                    
+                    for cmd in install_commands:
+                        stdin, stdout, stderr = ssh_node.exec_command(cmd, timeout=300)
+                        if stdout.channel.recv_exit_status() != 0:
+                            error = stderr.read().decode('utf-8', 'replace')
+                            raise Exception(f"Échec sur {node_hostname}: {error}")
+
+                    app.logger.info(f"Hadoop installé avec succès sur {node_hostname}")
+
+                except Exception as e:
+                    app.logger.error(f"ERREUR {node_hostname}", exc_info=True)
+                    return jsonify({
+                        "error": f"Échec configuration {node_hostname}",
+                        "details": str(e),
+                        "node_ip": node_ip
+                    }), 500
+                finally:
+                    if ssh_node:
+                        ssh_node.close()
+        except Exception as e:
+            app.logger.error("ERREUR installation Hadoop: %s", str(e), exc_info=True)
+            return jsonify({
+                "error": "Échec configuration Hadoop",
+                "details": str(e),
+                "component": "hadoop_install"
+            }), 500
+
+        finally:
+            # Fermeture propre de la connexion
+            if namenode_ssh:
+                namenode_ssh.close()
+                app.logger.debug("Connexion NameNode fermée")
+# 10. Installer Java, net-tools et configurer l'environnement sur tous les nœuds
         
         for node in node_details:
             target_hostname = node.get("hostname")
@@ -3625,7 +3723,7 @@ def create_cluster_remote():
             configure_env_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
             client.exec_command(configure_env_cmd)
 
-        # 11. Création des playbooks Ansible et templates Jinja2 pour la configuration Hadoop
+# 11. Création des playbooks Ansible et templates Jinja2 pour la configuration Hadoop
         remote_templates_dir = remote_cluster_folder + "/templates"
         try:
             sftp.chdir(remote_templates_dir)
@@ -3790,7 +3888,7 @@ def create_cluster_remote():
       debug:
         var: jps_output.stdout
 """)
-        # 12. Exécution des playbooks via vagrant ssh sur le NameNode
+# 11. Exécution des playbooks via vagrant ssh sur le NameNode
         inventory_filename = remote_inventory_path.split("/")[-1]
         config_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "ansible-playbook -i {inventory_filename} hadoop_config.yml"'
         stdin, stdout, stderr = client.exec_command(config_cmd)
