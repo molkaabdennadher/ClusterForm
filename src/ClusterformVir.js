@@ -123,7 +123,7 @@ export default function ClusterFormVir() {
         isSparkSelected,
         nodeDetails: [...nodeDetails, currentNodeData],
         customBoxes,
-        remote_ip: "10.200.240.85",
+        remote_ip: "192.168.0.27",
         remote_user: "User",
         remote_password: "amiria123"
       };

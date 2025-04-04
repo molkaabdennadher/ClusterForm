@@ -3323,7 +3323,6 @@ def create_cluster_remote():
     SHELL
   end
 '''
-       
         vagrantfile_content += "end\n"
         remote_vagrantfile_path = remote_cluster_folder + "/Vagrantfile"
         with sftp.open(remote_vagrantfile_path, "w") as f:
@@ -3343,7 +3342,6 @@ def create_cluster_remote():
             client.close()
             return jsonify({"error": "Error during 'vagrant up'", "details": err_vagrant}), 500
         print("DEBUG - vagrant up exécuté :", out_vagrant)
-
         # 6. Génération de l'inventaire Ansible
         inventory_lines = []
         namenode_lines = []
@@ -3380,18 +3378,10 @@ def create_cluster_remote():
         remote_inventory_path = remote_cluster_folder + "/inventory.ini"
         with sftp.open(remote_inventory_path, "w") as f:
             f.write(inventory_content)
+        print(inventory_content)    
+        sftp.chmod(remote_inventory_path, 0o644)  
         print("DEBUG - Inventaire Ansible écrit sur la machine distante.")
 
-        # 7. Installation d'Ansible sur le NameNode et configuration SSH entre les nœuds
-        # Trouver le NameNode
-        namenode = None
-        for node in node_details:
-            if node.get("isNameNode"):
-                namenode = node
-                break
-        if not namenode:
-            return jsonify({"error": "No NameNode defined"}), 400
-        namenode_hostname = namenode.get("hostname")
 # 7. Vérification/Installation d'Ansible sur le NameNode
 # Trouver le NameNode
         namenode = None
@@ -3405,7 +3395,6 @@ def create_cluster_remote():
         namenode_hostname = namenode.get("hostname")
         namenode_ip = namenode.get("ip")
         print("DEBUG - IP du NameNode :", namenode_ip)
-
 # Connexion SSH vers le NameNode en utilisant le mot de passe (remote_password)
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -3652,9 +3641,6 @@ def create_cluster_remote():
             if exit_status != 0:
                 error = stderr.read().decode('utf-8', 'replace')
                 raise Exception(f"Échec extraction Hadoop: {error}")
-
-
-
 # 9. Copier l'archive Hadoop vers les autres nœuds
             for node in node_details:
                 node_hostname = node.get("hostname")
@@ -3716,13 +3702,63 @@ def create_cluster_remote():
                 app.logger.debug("Connexion NameNode fermée")
 # 10. Installer Java, net-tools et configurer l'environnement sur tous les nœuds
         
+# 10. Configuration de l'environnement sur tous les nœuds
         for node in node_details:
-            target_hostname = node.get("hostname")
-            install_java_net_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
-            client.exec_command(install_java_net_cmd)
-            configure_env_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
-            client.exec_command(configure_env_cmd)
+            node_hostname = node.get("hostname")
+            node_ip = node.get("ip")
+            
+            ssh_node = None
+            try:
+                # Connexion SSH directe au nœud
+                ssh_node = paramiko.SSHClient()
+                ssh_node.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh_node.connect(
+                    node_ip,
+                    username='vagrant',
+                    password='vagrant',
+                    timeout=15,
+                    banner_timeout=30
+                )
+                
+                # Installation des paquets
+                install_cmd = '''
+                    sudo apt-get update -qq && 
+                    sudo apt-get install -yq default-jdk net-tools python3
+                '''
+                stdin, stdout, stderr = ssh_node.exec_command(install_cmd, timeout=300)
+                if stdout.channel.recv_exit_status() != 0:
+                    error = stderr.read().decode('utf-8', 'replace')
+                    raise Exception(f"Échec installation paquets: {error}")
 
+                # Configuration de l'environnement
+                env_config = '''
+                    echo 'export JAVA_HOME=/usr/lib/jvm/default-java' | sudo tee -a /etc/profile.d/hadoop.sh && 
+                    echo 'export HADOOP_HOME=/opt/hadoop' | sudo tee -a /etc/profile.d/hadoop.sh && 
+                    echo 'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin' | sudo tee -a /etc/profile.d/hadoop.sh && 
+                    sudo chmod +x /etc/profile.d/hadoop.sh
+                '''
+                stdin, stdout, stderr = ssh_node.exec_command(env_config)
+                if stdout.channel.recv_exit_status() != 0:
+                    error = stderr.read().decode('utf-8', 'replace')
+                    raise Exception(f"Échec configuration environnement: {error}")
+
+                # Appliquer immédiatement la configuration
+                stdin, stdout, stderr = ssh_node.exec_command('source /etc/profile.d/hadoop.sh')
+                
+                app.logger.info(f"Configuration réussie pour {node_hostname}")
+
+            except Exception as e:
+                app.logger.error(f"ERREUR sur {node_hostname}", exc_info=True)
+                return jsonify({
+                    "error": f"Échec configuration {node_hostname}",
+                    "details": str(e),
+                    "node_ip": node_ip,
+                    "component": "env_config"
+                }), 500
+
+            finally:
+                if ssh_node:
+                    ssh_node.close()
 # 11. Création des playbooks Ansible et templates Jinja2 pour la configuration Hadoop
         remote_templates_dir = remote_cluster_folder + "/templates"
         try:
@@ -3790,7 +3826,7 @@ def create_cluster_remote():
             f.write("""---
 - name: Configurer les fichiers de configuration Hadoop et /etc/hosts
   hosts: all
-  become: yes
+  sudo: yes
   vars:
     namenode_hostname: "{{ groups['namenode'][0] }}"
   tasks:
@@ -3889,19 +3925,105 @@ def create_cluster_remote():
         var: jps_output.stdout
 """)
 # 11. Exécution des playbooks via vagrant ssh sur le NameNode
-        inventory_filename = remote_inventory_path.split("/")[-1]
-        config_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "ansible-playbook -i {inventory_filename} hadoop_config.yml"'
-        stdin, stdout, stderr = client.exec_command(config_cmd)
-        out_config = stdout.read().decode("utf-8", errors="replace")
-        err_config = stderr.read().decode("utf-8", errors="replace")
-        if err_config.strip():
-            return jsonify({"error": "Error configuring Hadoop", "details": err_config}), 500
-        start_cmd = f'cd "{remote_cluster_folder}" && vagrant ssh {namenode_hostname} -c "ansible-playbook -i {inventory_filename} hadoop_start_services.yml"'
-        stdin, stdout, stderr = client.exec_command(start_cmd)
-        out_start = stdout.read().decode("utf-8", errors="replace")
-        err_start = stderr.read().decode("utf-8", errors="replace")
-        if err_start.strip():
-            return jsonify({"error": "Error starting Hadoop services", "details": err_start}), 500
+        namenode_ssh = None
+        try:
+            # Connexion SSH avec vérification de stabilité
+            namenode_ssh = paramiko.SSHClient()
+            namenode_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            namenode_ssh.connect(
+                namenode_ip,
+                username='vagrant',
+                password='vagrant',
+                timeout=20,
+                banner_timeout=45
+            )
+            
+            # Configuration keepalive et vérification de la connexion
+            transport = namenode_ssh.get_transport()
+            transport.set_keepalive(15)  # Envoi d'un paquet NULL toutes les 15s
+            
+            # Forcer la copie du fichier d'inventaire vers un répertoire local qui gère bien les permissions
+            fix_perm_cmd = "cp /vagrant/inventory.ini /tmp/inventory.ini && chmod 0644 /tmp/inventory.ini"
+            stdin, stdout, stderr = namenode_ssh.exec_command(fix_perm_cmd)
+            stdout.channel.recv_exit_status()  # attendre la fin de la commande
+
+            # Utiliser le nouvel emplacement de l'inventaire pour l'exécution des playbooks
+            inventory_path = "/tmp/inventory.ini"
+            config_playbook = "/vagrant/hadoop_config.yml"
+            start_playbook = "/vagrant/hadoop_start_services.yml"
+
+            # Vérification préalable des fichiers (inventory et playbook de configuration)
+            check_files_cmd = f"""
+            [ -f {inventory_path} ] && \
+            [ -f {config_playbook} ] || \
+            (echo 'FICHIER MANQUANT' && exit 1)
+            """
+            stdin, stdout, stderr = namenode_ssh.exec_command(check_files_cmd)
+            if stdout.channel.recv_exit_status() != 0:
+                raise Exception("Fichier inventory ou playbook manquant")
+
+            # Exécution du playbook de configuration
+            config_cmd = f"""
+            cd /vagrant && \
+            ansible-playbook -i {inventory_path} {config_playbook} --verbose
+            """
+            stdin, stdout, stderr = namenode_ssh.exec_command(config_cmd, timeout=600)
+
+            # Lecture en temps réel des sorties de la commande
+            output = []
+            while True:
+                line = stdout.readline()
+                if not line:
+                    break
+                output.append(line)
+                app.logger.debug(f"ANSIBLE: {line.strip()}")
+
+            exit_status = stdout.channel.recv_exit_status()
+            full_output = ''.join(output)
+            if exit_status != 0:
+                error_details = {
+                    "exit_code": exit_status,
+                    "output": full_output,
+                    "error": stderr.read().decode('utf-8', 'replace')
+                }
+                app.logger.error("ÉCHEC CONFIGURATION: %s", error_details)
+                raise Exception(f"Échec configuration Hadoop: {error_details}")
+
+            print("Playbook de configuration exécuté avec succès.")
+
+            # Exécution du playbook de démarrage
+            start_cmd = f"ansible-playbook -i {inventory_path} {start_playbook}"
+            app.logger.info(f"Exécution: {start_cmd}")
+            
+            stdin, stdout, stderr = namenode_ssh.exec_command(start_cmd, timeout=300)
+            exit_status = stdout.channel.recv_exit_status()
+            start_output = stdout.read().decode('utf-8', 'replace')
+            start_errors = stderr.read().decode('utf-8', 'replace')
+            
+            if exit_status != 0:
+                app.logger.error("Échec démarrage services:\n%s\n%s", start_output, start_errors)
+                return jsonify({
+                    "error": "Échec démarrage services Hadoop",
+                    "details": {
+                        "stdout": start_output,
+                        "stderr": start_errors
+                    }
+                }), 500
+
+            app.logger.info("Configuration Hadoop terminée avec succès")
+            print("Playbooks exécutés avec succès.")
+
+        except Exception as e:
+            app.logger.exception("ERREUR EXÉCUTION PLAYBOOK")
+            return jsonify({
+                "error": "Erreur critique pendant l'exécution Ansible",
+                "details": str(e)
+            }), 500
+
+        finally:
+            if namenode_ssh:
+                namenode_ssh.close()
+
 
   # -------------------- 12. Copie du dossier du cluster depuis la machine distante vers la machine source --------------------
         local_cluster_local_folder = os.path.join("clusters_local", cluster_name)
