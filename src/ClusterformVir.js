@@ -40,7 +40,7 @@ export default function ClusterFormVir() {
   // État pour les données du nœud en cours de saisie
   const [currentNodeData, setCurrentNodeData] = useState({
     hostname: "",
-    osVersion: osOptions[0] || "ubuntu/bionic64",
+    osVersion: "ubuntu/bionic64", //a voir pour l'image 
     ram: 4,
     cpu: 2,
     ip: "192.168.56.4",
@@ -98,7 +98,7 @@ export default function ClusterFormVir() {
       setCurrentNodeIndex((prev) => prev + 1);
       setCurrentNodeData({
         hostname: "",
-        osVersion: osOptions[0] || "ubuntu/bionic64",
+        osVersion:  "ubuntu/bionic64",
         ram: 4,
         cpu: 2,
         ip: "",

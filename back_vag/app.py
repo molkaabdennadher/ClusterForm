@@ -3237,8 +3237,9 @@ def create_cluster_remote():
       12. Copie (au moins) du Vagrantfile depuis le dossier distant vers la machine source.
       13. Retour d’un JSON contenant les informations utiles.
     """
+
     try:
-        # 1. Récupération des données
+        ## 1. Récupération des données envoyées par le front-end
         cluster_data = request.get_json()
         if not cluster_data:
             return jsonify({"error": "No data received"}), 400
@@ -3249,32 +3250,32 @@ def create_cluster_remote():
         if not node_details:
             return jsonify({"error": "nodeDetails is required"}), 400
 
-        # Paramètres de connexion distante
+        ## 2. Paramètres de connexion à la machine hôte distante
         remote_ip = cluster_data.get("remote_ip")
         remote_user = cluster_data.get("remote_user")
         remote_password = cluster_data.get("remote_password")
-        remote_os = cluster_data.get("remote_os", "windows").lower()  # Par défaut Windows, modifiez si nécessaire
+        remote_os = cluster_data.get("remote_os", "windows").lower()  # Par défaut Windows
         recipient_email = cluster_data.get("mail")  # Pour notification éventuelle
 
-        # 2. Connexion SSH avec fallback via PowerShell
+        ## 3. Connexion SSH à la machine hôte distante
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            print(remote_ip,remote_user,remote_password)
+            print(remote_ip, remote_user, remote_password)
             client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
         except Exception as ssh_err:
             print("Échec de la connexion SSH :", ssh_err)
-            print("Tentative de configuration SSH via PowerShell...")
+            ## Option fallback avec PowerShell si besoin
             client.connect(remote_ip, username=remote_user, password=remote_password)
             client.exec_command('powershell -Command "Restart-Service sshd"')
             client.close()
-            # Reconnexion
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(remote_ip, username=remote_user, password=remote_password, timeout=10)
         print("Connexion SSH établie avec la machine distante.")
         sftp = client.open_sftp()
-        # 3. Création du dossier du cluster sur la machine distante
+
+        ## 4. Création du dossier de cluster sur la machine hôte distante
         if remote_os == "windows":
             home_dir = sftp.getcwd() or "."
         else:
@@ -3297,17 +3298,29 @@ def create_cluster_remote():
         remote_cluster_folder = sftp.getcwd()
         print("DEBUG - Dossier du cluster sur machine distante :", remote_cluster_folder)
 
-        # 4. Génération du Vagrantfile
+        ## 5. Génération du Vagrantfile
+        ## Pour Windows, on utilise le chemin tel quel ; pour Linux (Ubuntu), on suppose que le dossier partagé se monte sous /vagrant
+        if remote_os == "windows":
+            print(remote_cluster_folder)
+            #remote_cluster_folder = remote_cluster_folder.replace("/", "\\") 
+         ## Correction : conversion du chemin au format Windows (remplacer / par \ et supprimer le premier '/')
+            folder = remote_cluster_folder.lstrip("/").replace("/", "\\")
+            print(folder)
+   
+            vagrant_cmd = f'cd /d "{folder}" && '
+
+        else:
+            remote_cluster_folder = f"/vagrant/{cluster_name}"  ## Forcer le chemin dans la VM
+            vagrant_cmd = f'cd "{remote_cluster_folder}" && '
+        ## Construction du Vagrantfile avec provisionnement pour configurer le DNS
         vagrantfile_content = 'Vagrant.configure("2") do |config|\n'
-        
         for node in node_details:
             hostname = node.get("hostname")
-            os_version = node.get("osVersion", "ubuntu/bionic64")
+            os_version = node.get("osVersion")  ## Box compatible avec Ubuntu Bionic (Python 3.x)
             ram = node.get("ram", 4)  # en GB
             cpu = node.get("cpu", 2)
             ip = node.get("ip")
             ram_mb = int(ram * 1024)
-            print(os_version)
             vagrantfile_content += f'''  config.vm.define "{hostname}" do |machine|
     machine.vm.box = "{os_version}"
     machine.vm.hostname = "{hostname}"
@@ -3315,9 +3328,10 @@ def create_cluster_remote():
     machine.vm.provider "virtualbox" do |vb|
       vb.name = "{hostname}"
       vb.memory = "{ram_mb}"
-      vb.cpus = {cpu} 
+      vb.cpus = {cpu}
     end
 
+    # Provisioning : configuration du DNS sur la VM
     machine.vm.provision "shell", inline: <<-SHELL
       echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
     SHELL
@@ -3328,7 +3342,8 @@ def create_cluster_remote():
         with sftp.open(remote_vagrantfile_path, "w") as f:
             f.write(vagrantfile_content)
         print("DEBUG - Vagrantfile écrit sur la machine distante.")
-        # 5. Lancement des VMs via "vagrant up"
+
+        ## 6. Lancement des VMs via "vagrant up"
         if remote_os == "windows":
             folder = remote_cluster_folder.lstrip("/")
             cmd_vagrant = f'cd /d "{folder}" && vagrant up'
@@ -3340,251 +3355,43 @@ def create_cluster_remote():
         if err_vagrant.strip():
             sftp.close()
             client.close()
-            return jsonify({"error": "Error during 'vagrant up'", "details": err_vagrant}), 500
+            return jsonify({"error": "Erreur lors de 'vagrant up'", "details": err_vagrant}), 500
         print("DEBUG - vagrant up exécuté :", out_vagrant)
-        # 6. Génération de l'inventaire Ansible
-        inventory_lines = []
-        namenode_lines = []
-        resourcemanager_lines = []
-        datanodes_lines = []
-        nodemanagers_lines = []
-        for node in node_details:
-            hostname = node.get("hostname")
-            ip = node.get("ip")
-            if node.get("isNameNode"):
-                namenode_lines.append(f"{hostname} ansible_host={ip}")
-            if node.get("isResourceManager"):
-                resourcemanager_lines.append(f"{hostname} ansible_host={ip}")
-            if node.get("isDataNode"):
-                datanodes_lines.append(f"{hostname} ansible_host={ip}")
-                nodemanagers_lines.append(f"{hostname} ansible_host={ip}")
-        if namenode_lines:
-            inventory_lines.append("[namenode]")
-            inventory_lines.extend(namenode_lines)
-        if resourcemanager_lines:
-            inventory_lines.append("[resourcemanager]")
-            inventory_lines.extend(resourcemanager_lines)
-        if datanodes_lines:
-            inventory_lines.append("[datanodes]")
-            inventory_lines.extend(datanodes_lines)
-        if nodemanagers_lines:
-            inventory_lines.append("[nodemanagers]")
-            inventory_lines.extend(nodemanagers_lines)
-        global_vars = ("[all:vars]\n"
-                       "ansible_user=vagrant\n"
-                       "ansible_python_interpreter=/usr/bin/python3\n"
-                       "ansible_ssh_common_args='-o StrictHostKeyChecking=no'\n\n")
-        inventory_content = global_vars + "\n".join(inventory_lines)
-        remote_inventory_path = remote_cluster_folder + "/inventory.ini"
-        with sftp.open(remote_inventory_path, "w") as f:
-            f.write(inventory_content)
-        print(inventory_content)    
-        sftp.chmod(remote_inventory_path, 0o644)  
-        print("DEBUG - Inventaire Ansible écrit sur la machine distante.")
 
-# 7. Vérification/Installation d'Ansible sur le NameNode
-# Trouver le NameNode
-        namenode = None
-        for node in node_details:
-            if node.get("isNameNode"):
-                namenode = node
-                break
-        if not namenode:
-            return jsonify({"error": "No NameNode defined"}), 400
-
-        namenode_hostname = namenode.get("hostname")
-        namenode_ip = namenode.get("ip")
-        print("DEBUG - IP du NameNode :", namenode_ip)
-# Connexion SSH vers le NameNode en utilisant le mot de passe (remote_password)
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            ssh.connect(namenode_ip, username='vagrant', password="vagrant")
-        except Exception as e:
-            return jsonify({"error": "Échec de la connexion SSH sur le NameNode", "details": str(e)}), 500
-        print("conx etablie")
-        # Vérification de l'installation d'Ansible sur le NameNode
-        stdin, stdout, stderr = ssh.exec_command("which ansible || echo 'not-installed'")
-        result = stdout.read().decode()
-        if 'not-installed' in result:
-            install_cmd = (
-                "sudo apt-get update && "
-                "sudo apt install -y software-properties-common && "
-                "sudo apt install -y ansible"
-            )
-            stdin, stdout, stderr = ssh.exec_command(install_cmd, timeout=200)
-            exit_status = stderr.channel.recv_exit_status()
-            print(stdout, stderr)
-            print("ansible installe")
-            if exit_status != 0:
-                error_details = {
-                        "stdout": stdout.read().decode().strip(),
-                        "stderr": stderr.read().decode().strip(),
-                        "exit_code": exit_status
-                }
-                ssh.close()
-                logging.error(f"Échec Ansible - Détails : {error_details}")
-                return jsonify({"error": "Échec installation Ansible", "details": error_details}), 500
-            else:
-                print("DEBUG - Ansible installé avec succès sur le NameNode.")
-        else:
-            print("DEBUG - Ansible est déjà installé sur le NameNode.")
-
-        ssh.close()
-
-        # b) Configuration SSH pour le NameNode : génération et récupération de la clé
-        try:
-            # 1. Connexion SSH au NameNode
-            app.logger.info("Tentative de connexion SSH à %s (%s)", namenode_hostname, namenode_ip)
-            nn_ssh = paramiko.SSHClient()
-            nn_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
-            try:
-                nn_ssh.connect(namenode_ip, username='vagrant', password="vagrant")
-                app.logger.debug("Connexion SSH établie - Version transport : %s", 
-                                nn_ssh.get_transport().get_security_options().kex)
-            except paramiko.SSHException as ssh_ex:
-                app.logger.error("Échec connexion SSH - Détails : %s", str(ssh_ex), exc_info=True)
-                raise
-
-            # 2. Génération clé SSH
-            app.logger.info("Génération des clés SSH sur %s", namenode_hostname)
-            gen_key_cmd = 'mkdir -p ~/.ssh && ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa -q'
-            stdin, stdout, stderr = nn_ssh.exec_command(gen_key_cmd, timeout=30)
-            
-            exit_status = stdout.channel.recv_exit_status()
-            # Correction décodage
-            gen_key_output = stdout.read().decode('utf-8', errors='replace').strip()
-            gen_key_errors = stderr.read().decode('utf-8', errors='replace')
-            
-            app.logger.debug("Sortie génération clé - Code:%d | Sortie:%s | Erreurs:%s", 
-                            exit_status, gen_key_output, gen_key_errors)
-            
-            if exit_status != 0:
-                app.logger.error("Échec génération clé SSH - Code sortie:%d | Erreurs:%s", 
-                                exit_status, gen_key_errors)
-                raise Exception("Échec lors de la génération des clés SSH")
-
-            # 4. Récupération clé publique
-            app.logger.info("Récupération clé publique sur %s", namenode_hostname)
-            get_key_cmd = 'cat ~/.ssh/id_rsa.pub 2>&1'
-            stdin, stdout, stderr = nn_ssh.exec_command(get_key_cmd, timeout=15)
-            
-            # Correction décodage
-            namenode_public_key = stdout.read().decode('utf-8', errors='replace').strip()
-            key_retrieval_errors = stderr.read().decode('utf-8', errors='replace')
-            
-            app.logger.debug("Clé brute récupérée : %s", namenode_public_key[:80] + "...")
-            
-            if not namenode_public_key.startswith("ssh-rsa"):
-                app.logger.error("Format clé invalide - Début clé:%s | Erreurs:%s", 
-                                namenode_public_key[:50], key_retrieval_errors)
-                raise ValueError("Clé publique corrompue ou vide")
-            
-            app.logger.info("Clé publique validée avec succès (empreinte : %s)", 
-                        hashlib.sha256(namenode_public_key.encode()).hexdigest()[:12])
-
-        except Exception as e:
-            app.logger.exception("ERREUR CRITIQUE dans configuration SSH - Type: %s | Détails: %s", 
-                                type(e).__name__, str(e))
-            return jsonify({
-                "error": f"Échec configuration SSH sur NameNode: {str(e)}",
-                "technical_details": {
-                    "timestamp": datetime.utcnow().isoformat(),  # Nécessite 'from datetime import datetime'
-                    "component": "ssh_keygen",
-                    "error_type": type(e).__name__
-                }
-            }), 500
-
-        finally:
-            if 'nn_ssh' in locals():
-                nn_ssh.close()
-                app.logger.debug("Connexion SSH fermée proprement")
-        # C-Configuration SSH pour les autres nœuds
+        ## 7. Installation d'Ansible sur la VM NameNode via Vagrant SSH
+        ## Récupération du nom de la VM NameNode depuis node_details
+        namenode_vm = next(node["hostname"] for node in node_details if node.get("isNameNode"))
+        print("NameNode VM :", namenode_vm)
+        ## Construction de la commande Vagrant SSH (sans le "--")
+        install_ansible_cmd = (
+            f'{vagrant_cmd} vagrant ssh {namenode_vm} -c '
+            '"sudo cp /etc/resolv.conf /etc/resolv.conf.backup && '      ## Sauvegarde du fichier de configuration DNS
+            'echo \'nameserver 8.8.8.8\' | sudo tee /etc/resolv.conf && '  ## Forçage du nameserver à 8.8.8.8
+            'sudo apt-get update && '                                      ## Mise à jour des paquets
+            'sudo apt install -y software-properties-common && '         ## Installation des utilitaires nécessaires
+            'sudo add-apt-repository ppa:ansible/ansible -y && '             ## Utilisation du PPA correct
+            'sudo apt install -y ansible sshpass"'
+        )
+        print("Commande à exécuter :", install_ansible_cmd)
+        stdin, stdout, stderr = client.exec_command(install_ansible_cmd, timeout=100)
+        exit_status = stderr.channel.recv_exit_status()
+        if exit_status != 0:
+            out = stdout.read().decode()
+            err = stderr.read().decode()
+            print("stdout:", out)
+            print("stderr:", err)
+            raise Exception(f"Erreur installation Ansible: {err}")
+        print("c'est bon ")
+        ## 8. Fermeture des connexions SFTP et SSH sur la machine hôte distante
+        sftp.close()
+        client.close()
         
-            nn_ssh.connect(namenode_ip, username='vagrant', password="vagrant")
-            app.logger.debug("Connexion SSH établie 2 avec namenode - Version transport : %s", 
-                            nn_ssh.get_transport().get_security_options().kex)
-      
-        for node in node_details:
-            node_hostname = node.get("hostname")
-            node_ip = node.get("ip")
-            print(node_ip)
-            
-            if node_hostname == namenode_hostname:
-                continue  # Passer le NameNode déjà configuré
+        ## (Les étapes suivantes pour la configuration des clés SSH sur les nœuds, etc.,
+        ##  seraient ici, mais cet extrait se concentre sur la connexion et l'installation d'Ansible via Vagrant SSH)
 
-            ssh_node = None
-            try:
-                # 1. Connexion SSH au nœud
-                ssh_node = paramiko.SSHClient()
-                ssh_node.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh_node.connect(node_ip, username='vagrant', password="vagrant")
-                app.logger.info(f"Connexion établie avec {node_hostname} ({node_ip})")
-                print("Connexion établie avec {node_hostname} ({node_ip})")
-                # 2. Génération des clés SSH
-                gen_key_cmd = '''
-                    [ -f ~/.ssh/id_rsa.pub ] || 
-                    ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa -q
-                '''
-                stdin, stdout, stderr = ssh_node.exec_command(gen_key_cmd)
-                if stdout.channel.recv_exit_status() != 0:
-                    raise Exception("Échec génération clé SSH : " + stderr.read().decode())
 
-                # 3. Récupération clé publique
-                stdin, stdout, stderr = ssh_node.exec_command("cat ~/.ssh/id_rsa.pub")
-                node_pubkey = stdout.read().decode('utf-8', 'replace').strip()
-                if not node_pubkey.startswith('ssh-rsa'):
-                    raise ValueError("Format de clé invalide")
-
-                # 4. Configuration autorized_keys
-                cmds = [
-                    # Sur le nœud courant
-                    f"echo {shlex.quote(node_pubkey)} >> ~/.ssh/authorized_keys",
-                    f"echo {shlex.quote(namenode_public_key)} >> ~/.ssh/authorized_keys",
-                    
-                    # Sur le NameNode
-                    f"echo {shlex.quote(node_pubkey)} >> ~/.ssh/authorized_keys"
-                ]
-
-                # Exécution sur le nœud
-                for cmd in cmds[:2]:
-                    stdin, stdout, stderr = ssh_node.exec_command(f"mkdir -p ~/.ssh && {cmd}")
-                    if stdout.channel.recv_exit_status() != 0:
-                        raise Exception(f"Échec configuration : {stderr.read().decode()}")
-
-                # Exécution sur le NameNode
-                stdin, stdout, stderr = nn_ssh.exec_command(f"mkdir -p ~/.ssh && {cmds[2]}")
-                if stdout.channel.recv_exit_status() != 0:
-                    raise Exception(f"Échec configuration NameNode : {stderr.read().decode()}")
-
-                # 5. Vérification finale
-                verify_cmd = "ssh -o StrictHostKeyChecking=no {} hostname".format(namenode_ip)
-                stdin, stdout, stderr = ssh_node.exec_command(verify_cmd, timeout=10)
-                if stdout.channel.recv_exit_status() != 0:
-                    raise Exception("Échec connexion SSH inversée : " + stderr.read().decode())
-
-                app.logger.info(f"Configuration SSH réussie pour {node_hostname}")
-                print(" ssh terminée")
-
-            except Exception as e:
-                app.logger.error(f"ERREUR sur {node_hostname}", exc_info=True)
-                return jsonify({
-                    "error": f"Échec configuration SSH pour {node_hostname}",
-                    "details": str(e),
-                    "node_ip": node_ip,
-                    "logs": {
-                        "pubkey": node_pubkey[:100] + "..." if node_pubkey else None,
-                        "last_command": cmd if 'cmd' in locals() else None
-                    }
-                }), 500
-
-            finally:
-                if ssh_node:
-                    ssh_node.close()
-        # 8. Installation de Hadoop sur le NameNode et mise à jour de l'archive dans le dossier partagé
+# 8. Installation de Hadoop sur le NameNode et mise à jour de l'archive dans le dossier partagé
        
-# 8. Installation de Hadoop sur le NameNode
         namenode_ssh = None
         try:
             # Connexion SSH directe au NameNode
@@ -3702,7 +3509,6 @@ def create_cluster_remote():
                 app.logger.debug("Connexion NameNode fermée")
 # 10. Installer Java, net-tools et configurer l'environnement sur tous les nœuds
         
-# 10. Configuration de l'environnement sur tous les nœuds
         for node in node_details:
             node_hostname = node.get("hostname")
             node_ip = node.get("ip")
@@ -3736,6 +3542,8 @@ def create_cluster_remote():
                     echo 'export HADOOP_HOME=/opt/hadoop' | sudo tee -a /etc/profile.d/hadoop.sh && 
                     echo 'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin' | sudo tee -a /etc/profile.d/hadoop.sh && 
                     sudo chmod +x /etc/profile.d/hadoop.sh
+                    echo 'export ANSIBLE_HOST_KEY_CHECKING=False'
+
                 '''
                 stdin, stdout, stderr = ssh_node.exec_command(env_config)
                 if stdout.channel.recv_exit_status() != 0:
