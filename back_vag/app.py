@@ -3343,6 +3343,52 @@ def create_cluster_remote():
             f.write(vagrantfile_content)
         print("DEBUG - Vagrantfile écrit sur la machine distante.")
 
+    # 4. Génération de l'inventaire Ansible
+        node_details = cluster_data.get("nodeDetails", [])
+        inventory_lines = []
+        namenode_lines = []
+        resourcemanager_lines = []
+        datanodes_lines = []
+        nodemanagers_lines = []
+        
+        for node in node_details:
+            hostname = node.get("hostname")
+            ip = node.get("ip")
+            if node.get("isNameNode"):
+                namenode_lines.append(f"{hostname} ansible_host={ip}")
+            if node.get("isResourceManager"):
+                resourcemanager_lines.append(f"{hostname} ansible_host={ip}")
+            if node.get("isDataNode"):
+                datanodes_lines.append(f"{hostname} ansible_host={ip}")
+                # Assurer la data locality : un DataNode est aussi NodeManager
+                nodemanagers_lines.append(f"{hostname} ansible_host={ip}")
+        
+            if namenode_lines:
+                inventory_lines.append("[namenode]")
+                inventory_lines.extend(namenode_lines)
+            if resourcemanager_lines:
+                inventory_lines.append("[resourcemanager]")
+                inventory_lines.extend(resourcemanager_lines)
+            if datanodes_lines:
+                inventory_lines.append("[datanodes]")
+                inventory_lines.extend(datanodes_lines)
+            if nodemanagers_lines:
+                inventory_lines.append("[nodemanagers]")
+                inventory_lines.extend(nodemanagers_lines)
+            
+            inventory_content = "\n".join(inventory_lines)
+            # Ajout de variables globales pour définir l'utilisateur SSH et l'interpréteur Python
+            global_vars = "[all:vars]\nansible_user=vagrant\nansible_python_interpreter=/usr/bin/python3\nansible_ssh_common_args='-o StrictHostKeyChecking=no'\n\n"
+            inventory_content = global_vars + inventory_content
+
+            inventory_path = os.path.join(folder, "inventory.ini")
+            try:
+                with open(inventory_path, "w", encoding="utf-8") as inv_file:
+                    inv_file.write(inventory_content)
+            except Exception as e:
+                return jsonify({"error": "Error writing inventory file", "details": str(e)}), 500
+
+
         ## 6. Lancement des VMs via "vagrant up"
         if remote_os == "windows":
             folder = remote_cluster_folder.lstrip("/")
@@ -3382,259 +3428,238 @@ def create_cluster_remote():
             print("stderr:", err)
             raise Exception(f"Erreur installation Ansible: {err}")
         print("c'est bon ")
-        ## 8. Fermeture des connexions SFTP et SSH sur la machine hôte distante
-        sftp.close()
-        client.close()
-        
-        ## (Les étapes suivantes pour la configuration des clés SSH sur les nœuds, etc.,
-        ##  seraient ici, mais cet extrait se concentre sur la connexion et l'installation d'Ansible via Vagrant SSH)
-
-
-# 8. Installation de Hadoop sur le NameNode et mise à jour de l'archive dans le dossier partagé
-       
-        namenode_ssh = None
+        ## --- Étape 8 : Configuration SSH sur le NameNode : génération et récupération de la clé ---
+        ## On se connecte de nouveau au NameNode (avec mot de passe) pour générer la paire de clés SSH
+ ## --- Déclaration du NameNode ---
+        ## Récupération du nœud qui est le NameNode dans node_details
+        namenode = next((node for node in node_details if node.get("isNameNode")), None)
+        if not namenode:
+            return jsonify({"error": "No NameNode defined"}), 400
+        namenode_ip = namenode.get("ip")       ## ## Déclaration de namenode_ip
+        namenode_hostname = namenode.get("hostname")  ## ## Déclaration de namenode_hostname        
+    # b. configuration de sssssssssh
+ # --- Configuration SSH pour le NameNode ---
         try:
-            # Connexion SSH directe au NameNode
-            namenode_ssh = paramiko.SSHClient()
-            namenode_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
-            # Configuration avec timeout et keepalive
-            namenode_ssh.connect(
-                namenode_ip,
-                username='vagrant',
-                password='vagrant',
-                timeout=20,
-                banner_timeout=40
+            # Générer une clé SSH sur le NameNode si elle n'existe pas et récupérer la clé publique
+            gen_key_cmd = f'vagrant ssh {namenode_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+            subprocess.run(gen_key_cmd, shell=True, cwd=folder, check=True)
+
+            get_pubkey_cmd = f'vagrant ssh {namenode_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+            result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=folder,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        universal_newlines=True, check=True)
+            namenode_public_key = result_pub.stdout.strip()
+            print("Public key du NameNode récupérée :", namenode_public_key)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": "Error generating or retrieving SSH key on NameNode", "details": str(e)}), 500
+
+        # Ajouter la clé du NameNode à son propre authorized_keys (pour permettre SSH local)
+        try:
+            add_self_key_cmd = (
+                f'vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && '
+                f'grep -q \'{namenode_public_key}\' ~/.ssh/authorized_keys || echo \'{namenode_public_key}\' >> ~/.ssh/authorized_keys && '
+                f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
             )
-            
-            # Activer le keepalive
-            transport = namenode_ssh.get_transport()
-            transport.set_keepalive(30)
+            subprocess.run(add_self_key_cmd, shell=True, cwd=folder, check=True)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": "Error configuring self SSH key on NameNode", "details": str(e)}), 500
 
-            # Vérifier si l'archive existe
-            stdin, stdout, stderr = namenode_ssh.exec_command('[ -f /vagrant/hadoop.tar.gz ] && echo "exists"')
-            archive_exists = "exists" in stdout.read().decode()
-            print(stdout, archive_exists)
-
-            if not archive_exists:
-                # Téléchargement et installation
-                commands = [
-                    'sudo apt-get update -qq',
-                    'sudo apt-get install -y wget',
-                    'wget -q -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz',
-                    'sudo tar -xzf /tmp/hadoop.tar.gz -C /opt',
-                    'sudo mv /opt/hadoop-3.3.1 /opt/hadoop',
-                    'sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop',
-                    'sudo cp /tmp/hadoop.tar.gz /vagrant/'
-                ]
-
-                for cmd in commands:
-                    app.logger.info(f"Exécution: {cmd[:60]}...")  # Log partiel pour éviter le spam
-                    stdin, stdout, stderr = namenode_ssh.exec_command(cmd, timeout=300)
-                    
-                    # Attendre la fin de l'exécution
-                    exit_status = stdout.channel.recv_exit_status()
-                    if exit_status != 0:
-                        error = stderr.read().decode('utf-8', 'replace')
-                        raise Exception(f"Échec commande '{cmd}': {error}")
-                print("fin d'execution de la commande de creation!")
-
-            # Extraction de l'archive (toujours nécessaire)
-            extract_cmd = 'sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt'
-            stdin, stdout, stderr = namenode_ssh.exec_command(extract_cmd, timeout=600)
-            print("extracté")
-            # Vérification finale
-            exit_status = stdout.channel.recv_exit_status()
-            if exit_status != 0:
-                error = stderr.read().decode('utf-8', 'replace')
-                raise Exception(f"Échec extraction Hadoop: {error}")
-# 9. Copier l'archive Hadoop vers les autres nœuds
-            for node in node_details:
-                node_hostname = node.get("hostname")
-                node_ip = node.get("ip")
-                
-                if node_hostname == namenode_hostname:
-                    continue
-
-                ssh_node = None
-                try:
-                    # Connexion SSH au nœud cible
-                    ssh_node = paramiko.SSHClient()
-                    ssh_node.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                    ssh_node.connect(
-                        node_ip,
-                        username='vagrant',
-                        password='vagrant',
-                        timeout=15,
-                        banner_timeout=30
-                    )
-                    
-                    # Commandes d'installation
-                    install_commands = [
-                        'sudo apt-get update -qq',
-                        'sudo rm -rf /opt/hadoop',
-                        'sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt'
-                    ]
-                    
-                    for cmd in install_commands:
-                        stdin, stdout, stderr = ssh_node.exec_command(cmd, timeout=300)
-                        if stdout.channel.recv_exit_status() != 0:
-                            error = stderr.read().decode('utf-8', 'replace')
-                            raise Exception(f"Échec sur {node_hostname}: {error}")
-
-                    app.logger.info(f"Hadoop installé avec succès sur {node_hostname}")
-
-                except Exception as e:
-                    app.logger.error(f"ERREUR {node_hostname}", exc_info=True)
-                    return jsonify({
-                        "error": f"Échec configuration {node_hostname}",
-                        "details": str(e),
-                        "node_ip": node_ip
-                    }), 500
-                finally:
-                    if ssh_node:
-                        ssh_node.close()
-        except Exception as e:
-            app.logger.error("ERREUR installation Hadoop: %s", str(e), exc_info=True)
-            return jsonify({
-                "error": "Échec configuration Hadoop",
-                "details": str(e),
-                "component": "hadoop_install"
-            }), 500
-
-        finally:
-            # Fermeture propre de la connexion
-            if namenode_ssh:
-                namenode_ssh.close()
-                app.logger.debug("Connexion NameNode fermée")
-# 10. Installer Java, net-tools et configurer l'environnement sur tous les nœuds
-        
+        # --- Configuration SSH pour les autres nœuds ---
         for node in node_details:
             node_hostname = node.get("hostname")
-            node_ip = node.get("ip")
-            
-            ssh_node = None
-            try:
-                # Connexion SSH directe au nœud
-                ssh_node = paramiko.SSHClient()
-                ssh_node.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh_node.connect(
-                    node_ip,
-                    username='vagrant',
-                    password='vagrant',
-                    timeout=15,
-                    banner_timeout=30
-                )
-                
-                # Installation des paquets
-                install_cmd = '''
-                    sudo apt-get update -qq && 
-                    sudo apt-get install -yq default-jdk net-tools python3
-                '''
-                stdin, stdout, stderr = ssh_node.exec_command(install_cmd, timeout=300)
-                if stdout.channel.recv_exit_status() != 0:
-                    error = stderr.read().decode('utf-8', 'replace')
-                    raise Exception(f"Échec installation paquets: {error}")
+            if node_hostname != namenode_hostname:
+                try:
+                    # Générer une clé SSH sur le nœud s'il n'existe pas
+                    gen_key_cmd = f'vagrant ssh {node_hostname} -c "test -f ~/.ssh/id_rsa.pub || ssh-keygen -t rsa -N \'\' -f ~/.ssh/id_rsa"'
+                    subprocess.run(gen_key_cmd, shell=True, cwd=folder, check=True)
 
-                # Configuration de l'environnement
-                env_config = '''
-                    echo 'export JAVA_HOME=/usr/lib/jvm/default-java' | sudo tee -a /etc/profile.d/hadoop.sh && 
-                    echo 'export HADOOP_HOME=/opt/hadoop' | sudo tee -a /etc/profile.d/hadoop.sh && 
-                    echo 'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin' | sudo tee -a /etc/profile.d/hadoop.sh && 
-                    sudo chmod +x /etc/profile.d/hadoop.sh
-                    echo 'export ANSIBLE_HOST_KEY_CHECKING=False'
+                    # Récupérer la clé publique du nœud
+                    get_pubkey_cmd = f'vagrant ssh {node_hostname} -c "cat ~/.ssh/id_rsa.pub"'
+                    result_pub = subprocess.run(get_pubkey_cmd, shell=True, cwd=folder,
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                universal_newlines=True, check=True)
+                    node_public_key = result_pub.stdout.strip()
+                    print(f"Public key du nœud {node_hostname} récupérée :", node_public_key)
 
-                '''
-                stdin, stdout, stderr = ssh_node.exec_command(env_config)
-                if stdout.channel.recv_exit_status() != 0:
-                    error = stderr.read().decode('utf-8', 'replace')
-                    raise Exception(f"Échec configuration environnement: {error}")
+                    safe_node_public_key = shlex.quote(node_public_key)
 
-                # Appliquer immédiatement la configuration
-                stdin, stdout, stderr = ssh_node.exec_command('source /etc/profile.d/hadoop.sh')
-                
-                app.logger.info(f"Configuration réussie pour {node_hostname}")
+                    # Ajouter la clé du nœud dans son propre authorized_keys (pour SSH local)
+                    add_self_key_cmd = (
+                        f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                        f'grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && '
+                        f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    )
+                    subprocess.run(add_self_key_cmd, shell=True, cwd=folder, check=True)
 
-            except Exception as e:
-                app.logger.error(f"ERREUR sur {node_hostname}", exc_info=True)
-                return jsonify({
-                    "error": f"Échec configuration {node_hostname}",
-                    "details": str(e),
-                    "node_ip": node_ip,
-                    "component": "env_config"
-                }), 500
+                    # Ajouter la clé du NameNode dans l'authorized_keys du nœud (pour que le NameNode puisse s'y connecter)
+                    add_namenode_key_cmd = (
+                        f'vagrant ssh {node_hostname} -c "mkdir -p ~/.ssh && '
+                        f'grep -q {shlex.quote(namenode_public_key)} ~/.ssh/authorized_keys || echo {shlex.quote(namenode_public_key)} >> ~/.ssh/authorized_keys && '
+                        f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    )
+                    subprocess.run(add_namenode_key_cmd, shell=True, cwd=folder, check=True)
 
-            finally:
-                if ssh_node:
-                    ssh_node.close()
-# 11. Création des playbooks Ansible et templates Jinja2 pour la configuration Hadoop
-        remote_templates_dir = remote_cluster_folder + "/templates"
+                    # Ajouter la clé du nœud dans l'authorized_keys du NameNode (pour la connexion inverse)
+                    add_node_key_to_namenode_cmd = (
+                        f'vagrant ssh {namenode_hostname} -c "mkdir -p ~/.ssh && '
+                        f'grep -q {safe_node_public_key} ~/.ssh/authorized_keys || echo {safe_node_public_key} >> ~/.ssh/authorized_keys && '
+                        f'chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"'
+                    )
+                    subprocess.run(add_node_key_to_namenode_cmd, shell=True, cwd=folder, check=True)
+
+                except subprocess.CalledProcessError as e:
+                    return jsonify({"error": f"Error configuring SSH for node {node_hostname}", "details": str(e)}), 500
+
+
+        # 6. Installation de Hadoop sur le NameNode (si nécessaire) et mise à jour de l'archive dans le dossier partagé
         try:
-            sftp.chdir(remote_templates_dir)
-        except IOError:
-            sftp.mkdir("templates")
-        # core-site.xml.j2
-        with sftp.open(remote_templates_dir + "/core-site.xml.j2", "w") as f:
-            f.write("""<configuration>
-  <property>
-    <name>fs.defaultFS</name>
-    <value>hdfs://{{ namenode_hostname }}:9000</value>
-  </property>
-</configuration>
-""")
-        # hdfs-site.xml.j2
-        with sftp.open(remote_templates_dir + "/hdfs-site.xml.j2", "w") as f:
-            f.write("""<configuration>
-  <property>
-    <name>dfs.replication</name>
-    <value>2</value>
-  </property>
-  <property>
-    <name>dfs.namenode.http-address</name>
-    <value>{{ namenode_hostname }}:9870</value>
-  </property>
-</configuration>
-""")
-        # yarn-site.xml.j2
-        with sftp.open(remote_templates_dir + "/yarn-site.xml.j2", "w") as f:
-            f.write("""<configuration>
-  <property>
-    <name>yarn.resourcemanager.hostname</name>
-    <value>{{ groups['resourcemanager'][0] }}</value>
-  </property>
-</configuration>
-""")
-        # mapred-site.xml.j2
-        with sftp.open(remote_templates_dir + "/mapred-site.xml.j2", "w") as f:
-            f.write("""<configuration>
-  <property>
-    <name>mapreduce.framework.name</name>
-    <value>yarn</value>
-  </property>
-</configuration>
-""")
-        # masters.j2
-        with sftp.open(remote_templates_dir + "/masters.j2", "w") as f:
-            f.write("{{ groups['namenode'][0] }}\n")
-        # workers.j2
-        with sftp.open(remote_templates_dir + "/workers.j2", "w") as f:
-            f.write("""{% for worker in groups['datanodes'] %}
-{{ worker }}
-{% endfor %}
-""")
-        # hosts.j2
-        with sftp.open(remote_templates_dir + "/hosts.j2", "w") as f:
-            f.write("""# ANSIBLE GENERATED CLUSTER HOSTS
-{% for host in groups['all'] %}
-{{ hostvars[host]['ansible_host'] }} {{ host }}
-{% endfor %}
-""")
-        remote_config_playbook = remote_cluster_folder + "/hadoop_config.yml"
-        with sftp.open(remote_config_playbook, "w") as f:
-            f.write("""---
+            # Vérifier directement sur la VM si l'archive Hadoop existe déjà dans le dossier partagé (/vagrant)
+            check_archive_cmd = f'vagrant ssh {namenode_hostname} -c "test -f /vagrant/hadoop.tar.gz"'
+            result = subprocess.run(check_archive_cmd, shell=True, cwd=folder)
+            if result.returncode != 0:
+                # L'archive n'existe pas dans /vagrant : on installe Hadoop sur le NameNode
+                hadoop_install_cmd = (
+                    f'vagrant ssh {namenode_hostname} -c "sudo apt-get update && sudo apt-get install -y wget && '
+                    f'wget -O /tmp/hadoop.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz && '
+                    f'test -s /tmp/hadoop.tar.gz && '
+                    f'sudo tar -xzvf /tmp/hadoop.tar.gz -C /opt && '
+                    f'sudo mv /opt/hadoop-3.3.1 /opt/hadoop && '
+                    f'rm /tmp/hadoop.tar.gz"'
+                )
+                subprocess.run(hadoop_install_cmd, shell=True, cwd=folder, check=True)
+
+                # Créer l'archive Hadoop sur le NameNode
+                tar_hadoop_cmd = f'vagrant ssh {namenode_hostname} -c "sudo tar -czf /tmp/hadoop.tar.gz -C /opt hadoop"'
+                subprocess.run(tar_hadoop_cmd, shell=True, cwd=folder, check=True)
+
+                # Copier l'archive dans le dossier partagé (/vagrant)
+                copy_to_shared_cmd = f'vagrant ssh {namenode_hostname} -c "sudo cp /tmp/hadoop.tar.gz /vagrant/hadoop.tar.gz"'
+                subprocess.run(copy_to_shared_cmd, shell=True, cwd=folder, check=True)
+            else:
+                print("L'archive Hadoop existe déjà dans /vagrant/hadoop.tar.gz, on l'utilise pour mettre à jour le NameNode.")
+                # Même si l'archive existe, on extrait sur le NameNode pour mettre à jour /opt/hadoop
+                extract_cmd = f'vagrant ssh {namenode_hostname} -c "sudo rm -rf /opt/hadoop && sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+                subprocess.run(extract_cmd, shell=True, cwd=folder, check=True)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": "Error installing Hadoop on NameNode", "details": str(e)}), 500
+
+        # 7. Copier l'archive Hadoop vers les autres nœuds depuis le dossier partagé
+        for node in node_details:
+            if node.get("hostname") != namenode_hostname:
+                target_hostname = node.get("hostname")
+                try:
+                    copy_hadoop_cmd = (
+                        f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y openssh-client && '
+                        f'sudo rm -rf /opt/hadoop && '
+                        f'sudo tar -xzf /vagrant/hadoop.tar.gz -C /opt"'
+                    )
+                    subprocess.run(copy_hadoop_cmd, shell=True, cwd=folder, check=True)
+                except subprocess.CalledProcessError as e:
+                    return jsonify({
+                        "error": f"Error copying Hadoop to node {target_hostname}",
+                        "details": str(e)
+                    }), 500
+
+    # Installer Java et net-tools et configurer les variables d'environnement sur tous les nœuds
+        for node in node_details:
+                target_hostname = node.get("hostname")
+                try:
+                    install_java_net_cmd = (
+                        f'vagrant ssh {target_hostname} -c "sudo apt-get update && sudo apt-get install -y default-jdk net-tools python3"'
+                    )
+                    subprocess.run(install_java_net_cmd, shell=True, cwd=folder, check=True)
+                    configure_env_cmd = (
+                        f'vagrant ssh {target_hostname} -c "echo \'export JAVA_HOME=/usr/lib/jvm/default-java\' >> ~/.bashrc && '
+                        f'echo \'export HADOOP_HOME=/opt/hadoop\' >> ~/.bashrc && '
+                        f'echo \'export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin\' >> ~/.bashrc"'
+                    )
+                    subprocess.run(configure_env_cmd, shell=True, cwd=folder, check=True)
+                except subprocess.CalledProcessError as e:
+                    return jsonify({"error": f"Error installing Java/net/python or configuring environment on node {target_hostname}", "details": str(e)}), 500
+
+
+    # 7. Création des playbooks Ansible et des templates Jinja2 pour la configuration Hadoop
+
+        # Créer le dossier "templates" pour stocker les fichiers de configuration Jinja2
+        templates_dir = os.path.join(folder, "templates")
+        os.makedirs(templates_dir, exist_ok=True)
+
+        # Template pour core-site.xml
+        core_site_template = """<configuration>
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://{{ namenode_hostname }}:9000</value>
+    </property>
+    </configuration>
+    """
+        with open(os.path.join(templates_dir, "core-site.xml.j2"), "w", encoding="utf-8") as f:
+            f.write(core_site_template)
+
+        # Template pour hdfs-site.xml (ajout du port 9870 pour l'interface Web)
+        hdfs_site_template = """<configuration>
+    <property>
+        <name>dfs.replication</name>
+        <value>2</value>
+    </property>
+    <property>
+        <name>dfs.namenode.http-address</name>
+        <value>{{ namenode_hostname }}:9870</value>
+    </property>
+    </configuration>
+    """
+        with open(os.path.join(templates_dir, "hdfs-site.xml.j2"), "w", encoding="utf-8") as f:
+            f.write(hdfs_site_template)
+
+        # Template pour yarn-site.xml
+        yarn_site_template = """<configuration>
+    <property>
+        <name>yarn.resourcemanager.hostname</name>
+        <value>{{ groups['resourcemanager'][0] }}</value>
+    </property>
+    </configuration>
+    """
+        with open(os.path.join(templates_dir, "yarn-site.xml.j2"), "w", encoding="utf-8") as f:
+            f.write(yarn_site_template)
+
+        # Template pour mapred-site.xml
+        mapred_site_template = """<configuration>
+    <property>
+        <name>mapreduce.framework.name</name>
+        <value>yarn</value>
+    </property>
+    </configuration>
+    """
+        with open(os.path.join(templates_dir, "mapred-site.xml.j2"), "w", encoding="utf-8") as f:
+            f.write(mapred_site_template)
+
+        # Template pour le fichier masters (contenant le nom du NameNode)
+        masters_template = """{{ groups['namenode'][0] }}
+    """
+        with open(os.path.join(templates_dir, "masters.j2"), "w", encoding="utf-8") as f:
+            f.write(masters_template)
+
+        # Template pour le fichier workers (contenant la liste des DataNodes)
+        workers_template = """{% for worker in groups['datanodes'] %}
+    {{ worker }}
+    {% endfor %}
+    """
+        with open(os.path.join(templates_dir, "workers.j2"), "w", encoding="utf-8") as f:
+            f.write(workers_template)
+
+        # Template pour mettre à jour /etc/hosts avec tous les nœuds du cluster
+        hosts_template = """# ANSIBLE GENERATED CLUSTER HOSTS
+    {% for host in groups['all'] %}
+    {{ hostvars[host]['ansible_host'] }} {{ host }}
+    {% endfor %}
+    """
+        with open(os.path.join(templates_dir, "hosts.j2"), "w", encoding="utf-8") as f:
+            f.write(hosts_template)
+
+        # Création du playbook Ansible pour configurer les fichiers de Hadoop
+        hadoop_config_playbook = """---
 - name: Configurer les fichiers de configuration Hadoop et /etc/hosts
   hosts: all
-  sudo: yes
+  become: yes
   vars:
     namenode_hostname: "{{ groups['namenode'][0] }}"
   tasks:
@@ -3642,38 +3667,58 @@ def create_cluster_remote():
       template:
         src: templates/core-site.xml.j2
         dest: /opt/hadoop/etc/hadoop/core-site.xml
+
     - name: Déployer hdfs-site.xml
       template:
         src: templates/hdfs-site.xml.j2
         dest: /opt/hadoop/etc/hadoop/hdfs-site.xml
+
     - name: Déployer yarn-site.xml
       template:
         src: templates/yarn-site.xml.j2
         dest: /opt/hadoop/etc/hadoop/yarn-site.xml
+
     - name: Déployer mapred-site.xml
       template:
         src: templates/mapred-site.xml.j2
         dest: /opt/hadoop/etc/hadoop/mapred-site.xml
+
     - name: Déployer le fichier masters
       template:
         src: templates/masters.j2
         dest: /opt/hadoop/etc/hadoop/masters
+
     - name: Déployer le fichier workers
       template:
         src: templates/workers.j2
         dest: /opt/hadoop/etc/hadoop/workers
-    - name: Mettre à jour /etc/hosts
+
+    - name: Mettre à jour le fichier /etc/hosts avec les hôtes du cluster
       template:
         src: templates/hosts.j2
         dest: /etc/hosts
-""")
-        remote_start_playbook = remote_cluster_folder + "/hadoop_start_services.yml"
-        with sftp.open(remote_start_playbook, "w") as f:
-            f.write("""---
+
+    """
+
+
+        hadoop_config_playbook_path = os.path.join(folder, "hadoop_config.yml")
+        with open(hadoop_config_playbook_path, "w", encoding="utf-8") as f:
+            f.write(hadoop_config_playbook)
+    
+        # Création du playbook Ansible pour démarrer les services Hadoop
+        hadoop_start_playbook = """---
 - name: Démarrer les services Hadoop
   hosts: namenode
-  become: yes
+  become: yes  # On utilise become pour exécuter certaines commandes en sudo
   tasks:
+    - name: Créer le répertoire /opt/hadoop/logs si nécessaire
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
     - name: Mettre à jour hadoop-env.sh pour définir JAVA_HOME
       shell: |
         if grep -q '^export JAVA_HOME=' /opt/hadoop/etc/hadoop/hadoop-env.sh; then
@@ -3683,157 +3728,91 @@ def create_cluster_remote():
         fi
       args:
         executable: /bin/bash
-    - name: Créer /opt/hadoop/logs si nécessaire
-      file:
-        path: /opt/hadoop/logs
-        state: directory
-        owner: vagrant
-        group: vagrant
-        mode: '0755'
+
     - name: Formater le NameNode (si nécessaire)
       shell: "/opt/hadoop/bin/hdfs namenode -format -force"
       args:
         creates: /opt/hadoop/hdfs/name/current/VERSION
+        executable: /bin/bash
       become_user: vagrant
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
-      executable: /bin/bash
+
     - name: Démarrer HDFS
       shell: "/opt/hadoop/sbin/start-dfs.sh"
+      args:
+        executable: /bin/bash
       become_user: vagrant
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
-      executable: /bin/bash
-- name: Démarrer le ResourceManager
+        HDFS_NAMENODE_USER: vagrant
+        HDFS_DATANODE_USER: vagrant
+        HDFS_SECONDARYNAMENODE_USER: vagrant
+
+- name: Démarrer le ResourceManager sur le nœud dédié
   hosts: resourcemanager
   become: yes
   tasks:
     - name: Démarrer YARN
       shell: "/opt/hadoop/sbin/start-yarn.sh"
+      args:
+        executable: /bin/bash
       become_user: vagrant
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
-      executable: /bin/bash
-    - name: Démarrer explicitement le ResourceManager
+
+    - name: Démarrer explicitement le ResourceManager en arrière-plan
       shell: "nohup /opt/hadoop/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
+      args:
+        executable: /bin/bash
       become_user: vagrant
       environment:
         JAVA_HOME: /usr/lib/jvm/default-java
-      executable: /bin/bash
-    - name: Pause pour démarrer
+
+    - name: Pause de 10 secondes pour permettre au ResourceManager de démarrer
       pause:
         seconds: 10
-    - name: Vérifier les services Hadoop (jps)
+
+    - name: Vérifier le démarrage des services Hadoop (jps)
       shell: "jps"
+      args:
+        executable: /bin/bash
       register: jps_output
       become_user: vagrant
-      executable: /bin/bash
+
     - name: Afficher les processus Hadoop
       debug:
         var: jps_output.stdout
-""")
-# 11. Exécution des playbooks via vagrant ssh sur le NameNode
-        namenode_ssh = None
+
+    """
+        hadoop_start_playbook_path = os.path.join(folder, "hadoop_start_services.yml")
+        with open(hadoop_start_playbook_path, "w", encoding="utf-8") as f:
+            f.write(hadoop_start_playbook)
+
+        # Définir un préfixe pour la commande ansible-playbook en fonction de l'OS
+        ansible_cmd_prefix = ""
+        if platform.system() == "Windows":
+            ansible_cmd_prefix = "wsl "
+
+        # 8. Exécuter le playbook de configuration Hadoop sur le NameNode
         try:
-            # Connexion SSH avec vérification de stabilité
-            namenode_ssh = paramiko.SSHClient()
-            namenode_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            namenode_ssh.connect(
-                namenode_ip,
-                username='vagrant',
-                password='vagrant',
-                timeout=20,
-                banner_timeout=45
+            inventory_file_in_vm = os.path.basename(inventory_path)
+            config_playbook_cmd = (
+                f'vagrant ssh {namenode_hostname} -c "cd /vagrant && ansible-playbook -i {inventory_file_in_vm} hadoop_config.yml"'
             )
-            
-            # Configuration keepalive et vérification de la connexion
-            transport = namenode_ssh.get_transport()
-            transport.set_keepalive(15)  # Envoi d'un paquet NULL toutes les 15s
-            
-            # Forcer la copie du fichier d'inventaire vers un répertoire local qui gère bien les permissions
-            fix_perm_cmd = "cp /vagrant/inventory.ini /tmp/inventory.ini && chmod 0644 /tmp/inventory.ini"
-            stdin, stdout, stderr = namenode_ssh.exec_command(fix_perm_cmd)
-            stdout.channel.recv_exit_status()  # attendre la fin de la commande
+            subprocess.run(config_playbook_cmd, shell=True, cwd=folder, check=True)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": "Error configuring Hadoop configuration files", "details": str(e)}), 500
 
-            # Utiliser le nouvel emplacement de l'inventaire pour l'exécution des playbooks
-            inventory_path = "/tmp/inventory.ini"
-            config_playbook = "/vagrant/hadoop_config.yml"
-            start_playbook = "/vagrant/hadoop_start_services.yml"
+        # 9. Exécuter le playbook pour démarrer les services Hadoop sur le NameNode
+        try:
+            start_playbook_cmd = (
+                f'vagrant ssh {namenode_hostname} -c "cd /vagrant && ansible-playbook -i {inventory_file_in_vm} hadoop_start_services.yml"'
+            )
+            subprocess.run(start_playbook_cmd, shell=True, cwd=folder, check=True)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": "Error starting Hadoop services", "details": str(e)}), 500
 
-            # Vérification préalable des fichiers (inventory et playbook de configuration)
-            check_files_cmd = f"""
-            [ -f {inventory_path} ] && \
-            [ -f {config_playbook} ] || \
-            (echo 'FICHIER MANQUANT' && exit 1)
-            """
-            stdin, stdout, stderr = namenode_ssh.exec_command(check_files_cmd)
-            if stdout.channel.recv_exit_status() != 0:
-                raise Exception("Fichier inventory ou playbook manquant")
-
-            # Exécution du playbook de configuration
-            config_cmd = f"""
-            cd /vagrant && \
-            ansible-playbook -i {inventory_path} {config_playbook} --verbose
-            """
-            stdin, stdout, stderr = namenode_ssh.exec_command(config_cmd, timeout=600)
-
-            # Lecture en temps réel des sorties de la commande
-            output = []
-            while True:
-                line = stdout.readline()
-                if not line:
-                    break
-                output.append(line)
-                app.logger.debug(f"ANSIBLE: {line.strip()}")
-
-            exit_status = stdout.channel.recv_exit_status()
-            full_output = ''.join(output)
-            if exit_status != 0:
-                error_details = {
-                    "exit_code": exit_status,
-                    "output": full_output,
-                    "error": stderr.read().decode('utf-8', 'replace')
-                }
-                app.logger.error("ÉCHEC CONFIGURATION: %s", error_details)
-                raise Exception(f"Échec configuration Hadoop: {error_details}")
-
-            print("Playbook de configuration exécuté avec succès.")
-
-            # Exécution du playbook de démarrage
-            start_cmd = f"ansible-playbook -i {inventory_path} {start_playbook}"
-            app.logger.info(f"Exécution: {start_cmd}")
-            
-            stdin, stdout, stderr = namenode_ssh.exec_command(start_cmd, timeout=300)
-            exit_status = stdout.channel.recv_exit_status()
-            start_output = stdout.read().decode('utf-8', 'replace')
-            start_errors = stderr.read().decode('utf-8', 'replace')
-            
-            if exit_status != 0:
-                app.logger.error("Échec démarrage services:\n%s\n%s", start_output, start_errors)
-                return jsonify({
-                    "error": "Échec démarrage services Hadoop",
-                    "details": {
-                        "stdout": start_output,
-                        "stderr": start_errors
-                    }
-                }), 500
-
-            app.logger.info("Configuration Hadoop terminée avec succès")
-            print("Playbooks exécutés avec succès.")
-
-        except Exception as e:
-            app.logger.exception("ERREUR EXÉCUTION PLAYBOOK")
-            return jsonify({
-                "error": "Erreur critique pendant l'exécution Ansible",
-                "details": str(e)
-            }), 500
-
-        finally:
-            if namenode_ssh:
-                namenode_ssh.close()
-
-
-  # -------------------- 12. Copie du dossier du cluster depuis la machine distante vers la machine source --------------------
         local_cluster_local_folder = os.path.join("clusters_local", cluster_name)
         if not os.path.exists(local_cluster_local_folder):
             os.makedirs(local_cluster_local_folder)
@@ -3844,10 +3823,25 @@ def create_cluster_remote():
         with open(local_vagrantfile_path, "wb") as local_vf:
             local_vf.write(vagrant_data)
         print("DEBUG - Vagrantfile copié localement :", local_vagrantfile_path)
-
-        # 13. Fermeture des connexions
+        
+## --- Étape 10 : Fermeture des connexions sur la machine hôte distante ---
         sftp.close()
         client.close()
+  # -------------------- 12. Copie du dossier du cluster depuis la machine distante vers la machine source --------------------
+
+
+        return jsonify({
+            "message": f"Cluster '{cluster_name}' créé, Ansible installé et SSH configuré sur tous les nœuds.",
+            "vagrant_up_output": out_vagrant
+        }), 200
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    
+
+
 
         # Préparation de la réponse
         cluster_details = {
