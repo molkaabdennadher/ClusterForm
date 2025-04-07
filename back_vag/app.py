@@ -3218,6 +3218,58 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
+
+def send_email_with_cluster_credentials(recipient, cluster_info):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    # Configuration SMTP
+    SMTP_SERVER = "smtp.example.com"
+    SMTP_PORT = 587
+    SMTP_USER = "yourguidetocs@gmail.com"
+    SMTP_PASSWORD = "qcuo axza wjfa aunb"
+
+    # Construction du message
+    msg = MIMEMultipart()
+    msg['From'] = SMTP_USER
+    msg['To'] = recipient
+    msg['Subject'] = f"[Hadoop] Cluster {cluster_info['cluster_name']} créé"
+
+    # Corps du message
+    body = f"""
+<h2>Cluster Hadoop '{cluster_info['cluster_name']}' configuré avec succès</h2>
+
+<p><strong>Détails techniques :</strong></p>
+<ul>
+    <li>Dossier distant : {cluster_info['remote_cluster_folder']}</li>
+    <li>NameNode IP : {cluster_info['namenode_ip']}</li>
+    <li>Ports d'accès :
+        <ul>
+            <li>NameNode Web UI : {cluster_info['hadoop_ports']['namenode_web']}</li>
+            <li>ResourceManager : {cluster_info['hadoop_ports']['resourcemanager']}</li>
+        </ul>
+    </li>
+    <li>Nombre de nœuds : {len(cluster_info['node_details'])}</li>
+ </ul>
+
+<p><strong>Accès au cluster :</strong></p>
+<pre>ssh vagrant@{cluster_info['namenode_ip']} -p 22 (mot de passe: vagrant)</pre>
+
+<p>Fichier Vagrantfile local : {cluster_info['local_vagrantfile']}</p>
+
+Cordialement,
+L'équipe yourguidetocs
+"""
+
+    msg.attach(MIMEText(body, 'html'))
+
+    # Envoi du mail
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.send_message(msg)
+
 @app.route("/create-cluster-remote", methods=["POST"])
 def create_cluster_remote():
     """
@@ -3707,6 +3759,29 @@ def create_cluster_remote():
     
         # Création du playbook Ansible pour démarrer les services Hadoop
         hadoop_start_playbook = """---
+- name: Créer /opt/hadoop/logs avec permissions appropriées
+  hosts: all
+  become: yes
+  tasks:
+    - name: S'assurer que /opt/hadoop/logs existe
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0775'
+
+# hadoop_config.yml (extrait modifié)
+- name: Mettre à jour hadoop-env.sh pour définir JAVA_HOME sur tous les nœuds
+  hosts: all
+  become: yes
+  tasks:
+    - name: Définir JAVA_HOME dans hadoop-env.sh
+      lineinfile:
+        path: /opt/hadoop/etc/hadoop/hadoop-env.sh
+        regexp: '^export JAVA_HOME='
+        line: 'export JAVA_HOME=/usr/lib/jvm/default-java'
+
 - name: Démarrer les services Hadoop
   hosts: namenode
   become: yes  # On utilise become pour exécuter certaines commandes en sudo
@@ -3816,6 +3891,8 @@ def create_cluster_remote():
         local_cluster_local_folder = os.path.join("clusters_local", cluster_name)
         if not os.path.exists(local_cluster_local_folder):
             os.makedirs(local_cluster_local_folder)
+  # -------------------- 12. Copie du dossier du cluster depuis la machine distante vers la machine source --------------------
+
         # Ici, on copie au moins le Vagrantfile (vous pouvez étendre à d'autres fichiers)
         local_vagrantfile_path = os.path.join(local_cluster_local_folder, "Vagrantfile")
         with sftp.open(remote_vagrantfile_path, "rb") as remote_vf:
@@ -3827,7 +3904,7 @@ def create_cluster_remote():
 ## --- Étape 10 : Fermeture des connexions sur la machine hôte distante ---
         sftp.close()
         client.close()
-  # -------------------- 12. Copie du dossier du cluster depuis la machine distante vers la machine source --------------------
+        
 
 
         return jsonify({
@@ -3840,25 +3917,6 @@ def create_cluster_remote():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
     
-
-
-
-        # Préparation de la réponse
-        cluster_details = {
-            "message": f"Cluster '{cluster_name}' created remotely with full configuration",
-            "remote_cluster_folder": remote_cluster_folder,
-            "vagrant_up_output": out_vagrant,
-            "local_vagrantfile": os.path.abspath(local_vagrantfile_path)
-        }
-        # (Optionnel) Envoi d'email avec les infos du cluster via votre fonction send_email_with_cluster_credentials
-        # if recipient_email:
-        # send_email_with_cluster_credentials(recipient_email, cluster_details)
-
-        return jsonify(cluster_details), 200
-
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
