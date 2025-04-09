@@ -132,7 +132,7 @@ export default function ClusterFormVir() {
       let endpoint = "";
       if (isHaSelected) {
         endpoint = isSparkSelected
-          ? "http://localhost:5000/create_cluster_ha_spark"
+          ? "http://localhost:5000/create-cluster-HA-spark-remote"
           : "http://localhost:5000/create-cluster-HA-remote";
       } else {
         endpoint = "http://localhost:5000/create-cluster-remote";
