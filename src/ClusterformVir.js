@@ -125,14 +125,15 @@ export default function ClusterFormVir() {
         customBoxes,
         remote_ip: "192.168.0.27",
         remote_user: "User",
-        remote_password: "amiria123"
+        remote_password: "amiria123",
+        mail: "amiriaayoub@gmail.com"
       };
 
       let endpoint = "";
       if (isHaSelected) {
         endpoint = isSparkSelected
           ? "http://localhost:5000/create_cluster_ha_spark"
-          : "http://localhost:5000/create_cluster_ha";
+          : "http://localhost:5000/create-cluster-HA-remote";
       } else {
         endpoint = "http://localhost:5000/create-cluster-remote";
       }
