@@ -1,0 +1,78 @@
+become: true
+gather_facts: false
+hosts: all
+name: "D\xE9ploiement Hadoop via extraction"
+tasks:
+- file:
+    group: root
+    mode: '0755'
+    owner: root
+    path: /opt
+    state: directory
+  name: "Cr\xE9er r\xE9pertoire /opt"
+- apt:
+    name:
+    - openjdk-11-jdk
+    - sshpass
+    - net-tools
+    - pdsh
+    - tar
+    state: present
+    update_cache: true
+  name: Installer paquets requis
+- copy:
+    delegate_to: localhost
+    dest: /opt/hadoop.tar.gz
+    group: molka
+    mode: '0644'
+    owner: molka
+    src: /opt/hadoop.tar.gz
+  name: "Transf\xE9rer l'archive Hadoop"
+- file:
+    ignore_errors: true
+    path: /opt/hadoop
+    state: absent
+  name: Nettoyer ancienne installation
+- copy:
+    dest: /opt/hadoop.tar.gz
+    group: molka
+    mode: '0644'
+    owner: molka
+    src: /opt/hadoop.tar.gz
+  delegate_to: '{{ item }}'
+  name: Copier l'archive Hadoop vers les DataNodes et le NameNode
+  with_items: '{{ groups[''datanodes''] + groups[''namenode''] }}'
+- args:
+    executable: /bin/bash
+  delay: 10
+  name: Extraire Hadoop sur chaque DataNode et le NameNode
+  register: extraction
+  retries: 3
+  shell: mkdir -p /opt/hadoop && tar xzf /opt/hadoop.tar.gz -C /opt/hadoop --strip-components=1
+    && chown -R molka:molka /opt/hadoop
+  until: extraction is succeeded
+  when: inventory_hostname in groups['datanodes'] or inventory_hostname in groups['namenode']
+- blockinfile:
+    block: 'export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+
+      export HADOOP_HOME=/opt/hadoop
+
+      export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin:$HADOOP_HOME/sbin'
+    group: molka
+    marker: '# HADOOP CONFIG'
+    owner: molka
+    path: /home/molka/.bashrc
+  name: Configurer les variables sur chaque DataNode et le NameNode
+  when: inventory_hostname in groups['datanodes'] or inventory_hostname in groups['namenode']
+- become: true
+  ignore_errors: true
+  name: Reload bashrc sur chaque DataNode et le NameNode
+  shell: bash -l -c "source ~/.bashrc"
+  when: inventory_hostname in groups['datanodes'] or inventory_hostname in groups['namenode']
+- changed_when: false
+  name: "V\xE9rifier Hadoop sur chaque DataNode et le NameNode"
+  register: hadoop_check
+  shell: source ~/.bashrc && hadoop version
+  when: inventory_hostname in groups['datanodes'] or inventory_hostname in groups['namenode']
+- debug:
+    var: hadoop_check.stdout_lines

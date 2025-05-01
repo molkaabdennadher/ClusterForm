@@ -6,7 +6,7 @@ const HypervisorSelection = ({ onPrevious }) => {
   const navigate = useNavigate();
 
   const handleProxmoxSelect = () => {
-    navigate("/ajout-serveur-proxmox", { state: { hypervisor: "Proxmox" } });
+    navigate("/option-select", { state: { hypervisor: "Proxmox" } });
   };
   const handleVirtualBoxSelect = () => {
     navigate("/option-select", { state: { hypervisor: "VirtualBox" } });

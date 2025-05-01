@@ -17,7 +17,11 @@ const OptionSelect = () => {
 
   // Gestion du bouton suivant
   const handleNext = () => {
-    navigate("/mode-select", { state: { selectedOption: selection, hypervisor } });
+    if (selection === "Cluster" && hypervisor === "Proxmox") {
+      navigate("/ajout-serveur-proxmox", { state: { hypervisor, selectedOption: selection } });
+    } else {
+      navigate("/ajout-serveur-proxmox", { state: { selectedOption: selection, hypervisor } });
+    }
   };
   
 

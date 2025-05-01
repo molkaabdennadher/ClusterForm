@@ -1,8 +1,7 @@
-proxmox_ip = "192.168.1.100"
+proxmox_ip = "192.168.100.100"
 password = "molka"
-hostname = "d"
-ram = 2048
-cpu = 1
+hostname = "test-standby-4"
 target_node = "serveur"
-network_ip = "nat"
-vm_id = 111
+network_ip = "bridged"
+vm_id = 194
+template = "ubuntu-template"

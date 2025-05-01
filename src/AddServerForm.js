@@ -5,15 +5,22 @@ function AddServerForm({ onAddServer, onClose }) {
   const [node, setNode] = useState("");
   const [user, setUser] = useState("root");
   const [password, setPassword] = useState("");
+  const [template, setTemplate] = useState("");
+  const [TempId, setTempId] = useState(""); // Nouvel état pour le champ VM ID
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // Créer un nouvel objet serveur avec le champ Template et VM ID
     const newServer = {
       serverIp,
       node,
       user,
       password,
+      template,
+      TempId, // Ajout du champ VM ID
     };
+
     onAddServer(newServer); // Ajout du serveur dans l'état parent
 
     try {
@@ -22,7 +29,7 @@ function AddServerForm({ onAddServer, onClose }) {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(newServer),
+        body: JSON.stringify(newServer), // Envoyer les données au serveur
       });
 
       const data = await response.json();
@@ -38,10 +45,12 @@ function AddServerForm({ onAddServer, onClose }) {
     }
 
     // Réinitialisation des champs du formulaire
-    setServerIp(""); 
-    setNode(""); 
-    setUser("root"); 
-    setPassword(""); 
+    setServerIp("");
+    setNode("");
+    setUser("root");
+    setPassword("");
+    setTemplate("");
+    setTempId(""); // Réinitialiser le champ VM ID
   };
 
   return (
@@ -91,6 +100,28 @@ function AddServerForm({ onAddServer, onClose }) {
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full p-2 border rounded-lg"
                 placeholder="Mot de passe"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-gray-700">Template</label>
+              <input
+                type="text"
+                value={template}
+                onChange={(e) => setTemplate(e.target.value)}
+                className="w-full p-2 border rounded-lg"
+                placeholder="Ex: ubuntu-20.04-template"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-gray-700">Template ID</label>
+              <input
+                type="text"
+                value={TempId}
+                onChange={(e) => setTempId(e.target.value)}
+                className="w-full p-2 border rounded-lg"
+                placeholder="Ex: 100"
                 required
               />
             </div>

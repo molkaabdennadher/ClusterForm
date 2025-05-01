@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom'; // Import useLocation
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faPlay, faStop, faTerminal, faTrash, faTimes, faExchangeAlt } from '@fortawesome/free-solid-svg-icons';
 
@@ -12,10 +13,25 @@ const Dashboard = () => {
     password: '',
   });
 
+  const location = useLocation(); // Use useLocation to access navigation state
+
   useEffect(() => {
     const storedVMs = JSON.parse(localStorage.getItem('vms')) || [];
     setVms(storedVMs);
   }, []);
+
+  useEffect(() => {
+    const newVm = location.state?.newVm;
+    if (newVm) {
+      // Add the new VM to the vms state
+      setVms((prevVms) => [...prevVms, newVm]);
+
+      // Update localStorage with the new VM
+      const updatedVMs = [...vms, newVm];
+      localStorage.setItem('vms', JSON.stringify(updatedVMs));
+    }
+  }, [location.state]); // Trigger this effect when navigation state changes
+
 
   const handleStart = async (vm) => {
     try {
@@ -82,30 +98,37 @@ const Dashboard = () => {
   };
 
   const handleConsole = (vm) => {
+    if (!vm.ipAddress || vm.ipAddress === 'N/A') {
+      alert("L'adresse IP de la VM n'est pas disponible.");
+      return;
+    }
+  
+    // Extraire uniquement l'adresse IP (supprimer "inet" si présent)
+    const ipAddress = vm.ipAddress.replace('inet ', '');
+  
     fetch('http://localhost:5000/open_console', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        proxmoxIp: vm.proxmoxIp,
-        username: 'root',
-        password: vm.password,
+        vmIp: ipAddress, // Utiliser uniquement l'adresse IP
+        username: 'molka', // Utiliser le nom d'utilisateur "molka"
+        password: vm.password, // Utiliser le mot de passe de l'utilisateur "molka"
       }),
     })
       .then((response) => response.json())
       .then((data) => {
         if (data.success) {
-          alert('Console ouverte avec succès');
+          alert('Connexion SSH établie avec succès');
         } else {
-          alert(`Erreur lors de l'ouverture de la console : ${data.message}`);
+          alert(`Erreur : ${data.message}`);
         }
       })
       .catch((error) => {
         alert(`Erreur de connexion : ${error.message}`);
       });
   };
-
   const handleDelete = async (vm) => {
     if (window.confirm(`Are you sure you want to delete the VM ${vm.hostname}?`)) {
       try {
@@ -194,8 +217,7 @@ const Dashboard = () => {
               <th className="py-2 px-4 border">Hostname</th>
               <th className="py-2 px-4 border">ID</th>
               <th className="py-2 px-4 border">Network</th>
-              <th className="py-2 px-4 border">RAM (Mo)</th>
-              <th className="py-2 px-4 border">CPU</th>
+              <th className="py-2 px-4 border">IP Address</th> {/* Nouvelle colonne */}
               <th className="py-2 px-4 border">Template</th>
               <th className="py-2 px-4 border">Status</th>
               <th className="py-2 px-4 border">Creation Date</th>
@@ -211,8 +233,7 @@ const Dashboard = () => {
                 <td className="py-2 px-4 border">{vm.hostname}</td>
                 <td className="py-2 px-4 border">{vm.vm_id}</td>
                 <td className="py-2 px-4 border">{vm.network}</td>
-                <td className="py-2 px-4 border">{vm.ram}</td>
-                <td className="py-2 px-4 border">{vm.cpu}</td>
+                <td className="py-2 px-4 border">{vm.ipAddress || 'N/A'}</td> {/* Affichez l'adresse IP ici */}
                 <td className="py-2 px-4 border">{vm.template}</td>
                 <td className="py-2 px-4 border">{vm.status}</td>
                 <td className="py-2 px-4 border">{vm.creationDate}</td>

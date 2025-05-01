@@ -12,16 +12,16 @@ export const redirectToPage = (navigate, selectedOption, selectedMode, hyperviso
       path = "/DistantConfigVir";
     }
   } else if (hypervisor === "Proxmox") {
-    if (selectedOption === "Virtual Machine" && selectedMode === "Local mode") {
+    if (selectedOption === "Virtual Machine" ) {
       path = "/DistantConfig";
-    } else if (selectedOption === "Virtual Machine" && selectedMode === "Distant mode") {
+    } else if (selectedOption === "Virtual Machine") {
       path = "/CloneTemplate";
     }
   }
 
   if (path) {
     console.log("Navigation vers :", path);
-    navigate(path, { state: { hypervisor, selectedOption, selectedMode } });
+    navigate(path, { state: { hypervisor, selectedOption} });
   } else {
     console.error("Erreur de redirection", { hypervisor, selectedOption, selectedMode });
   }

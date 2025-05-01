@@ -1,0 +1,34 @@
+become: true
+hosts: all
+name: Configurer les fichiers de configuration Hadoop et /etc/hosts
+tasks:
+- name: "D\xE9ployer core-site.xml"
+  template:
+    dest: /opt/hadoop/etc/hadoop/core-site.xml
+    src: templates/core-site.xml.j2
+- name: "D\xE9ployer hdfs-site.xml"
+  template:
+    dest: /opt/hadoop/etc/hadoop/hdfs-site.xml
+    src: templates/hdfs-site.xml.j2
+- name: "D\xE9ployer yarn-site.xml"
+  template:
+    dest: /opt/hadoop/etc/hadoop/yarn-site.xml
+    src: templates/yarn-site.xml.j2
+- name: "D\xE9ployer mapred-site.xml"
+  template:
+    dest: /opt/hadoop/etc/hadoop/mapred-site.xml
+    src: templates/mapred-site.xml.j2
+- name: "D\xE9ployer le fichier masters"
+  template:
+    dest: /opt/hadoop/etc/hadoop/masters
+    src: templates/masters.j2
+- name: "D\xE9ployer le fichier workers"
+  template:
+    dest: /opt/hadoop/etc/hadoop/workers
+    src: templates/workers.j2
+- name: "Mettre \xE0 jour le fichier /etc/hosts avec les h\xF4tes du cluster"
+  template:
+    dest: /etc/hosts
+    src: templates/hosts.j2
+vars:
+  namenode_hostname: '{{ groups[''namenode''][0] }}'

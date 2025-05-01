@@ -1,51 +1,74 @@
-import AddServerForm from "./AddServerForm"; 
-import React, { useState } from "react"; 
-import { useNavigate } from "react-router-dom"; 
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome"; 
-import { faPlay, faStop, faPlus } from "@fortawesome/free-solid-svg-icons"; 
+import React, { useState } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faPlay, faStop, faPlus, faSync } from "@fortawesome/free-solid-svg-icons";
+import axios from "axios";
+import AddServerForm from "./AddServerForm";
 
 function AjoutServProx() {
   const [servers, setServers] = useState(() => {
     const savedServers = localStorage.getItem("servers");
-    return savedServers ? JSON.parse(savedServers) : []; // Retourne un tableau vide par défaut
+    return savedServers ? JSON.parse(savedServers) : [];
   });
-  const [showAddServerForm, setShowAddServerForm] = useState(false); 
-  const [selectedServer, setSelectedServer] = useState(null); 
+  const [showAddServerForm, setShowAddServerForm] = useState(false);
+  const [selectedServer, setSelectedServer] = useState(null);
   const navigate = useNavigate();
+  const location = useLocation();
+  const { selectedOption } = location.state || { selectedOption: "" }; // Récupérer selectedOption depuis l'état
 
-  const startServer = (id) => {
-    setServers((prevServers) => {
-      const updatedServers = prevServers.map((server) =>
-        server.id === id ? { ...server, status: "running" } : server
-      );
-      localStorage.setItem("servers", JSON.stringify(updatedServers));
-      return updatedServers;
-    });
+  console.log("Données reçues dans AjoutServProx :", location.state); // Debug
+
+  // Fonction pour récupérer les templates
+  const getTemplates = async (server) => {
+    try {
+      const response = await axios.post("http://localhost:5000/connect_and_get_templates", {
+        proxmox_ip: server.serverIp,
+        username: server.user,
+        password: server.password,
+      });
+
+      if (response.data.success) {
+        alert("Templates récupérés avec succès !");
+
+        // Mettre à jour les templates du serveur
+        const updatedServers = servers.map((s) =>
+          s.id === server.id ? { ...s, templates: response.data.templates } : s
+        );
+        setServers(updatedServers);
+        localStorage.setItem("servers", JSON.stringify(updatedServers));
+      } else {
+        alert(`Échec de la récupération des templates : ${response.data.error}`);
+      }
+    } catch (error) {
+      console.error("Erreur lors de la récupération des templates :", error);
+      alert(`Erreur lors de la récupération des templates : ${error.message}`);
+    }
   };
 
-  const stopServer = (id) => {
-    setServers((prevServers) => {
-      const updatedServers = prevServers.map((server) =>
-        server.id === id ? { ...server, status: "stopped" } : server
-      );
-      localStorage.setItem("servers", JSON.stringify(updatedServers));
-      return updatedServers;
-    });
+  // Fonction pour naviguer vers la page suivante
+  const navigateToNextPage = (server) => {
+    if (!server) {
+      alert("Veuillez sélectionner un serveur.");
+      return;
+    }
+
+    // Naviguer vers la page appropriée en fonction de selectedOption
+    if (selectedOption === "Cluster") {
+      navigate("/ClusterProx", { state: { selectedServer: server } });
+    } else if (selectedOption === "Virtual Machine") {
+      navigate("/DistantConfig", { state: { targetServer: server } });
+    }
   };
 
+  // Fonction pour ajouter un nouveau serveur
   const addServer = (newServer) => {
-    setServers((prevServers) => {
-      const updatedServers = [...prevServers, { ...newServer, id: Date.now() }];
-      localStorage.setItem("servers", JSON.stringify(updatedServers));
-      return updatedServers;
-    });
+    const updatedServers = [...servers, { ...newServer, id: Date.now(), templates: [] }];
+    setServers(updatedServers);
+    localStorage.setItem("servers", JSON.stringify(updatedServers));
     setShowAddServerForm(false);
   };
 
-  const handleNext = () => {
-    navigate("/option-select", { state: { hypervisor: "Proxmox" } });
-  };
-
+  // Fonction pour naviguer vers la page précédente
   const handlePrevious = () => {
     navigate("/");
   };
@@ -71,6 +94,8 @@ function AjoutServProx() {
                 <th className="px-6 py-4 border-b text-left">Node</th>
                 <th className="px-6 py-4 border-b text-left">User</th>
                 <th className="px-6 py-4 border-b text-left">Password</th>
+                <th className="px-6 py-4 border-b text-left">Template</th>
+                <th className="px-6 py-4 border-b text-left">Template ID</th>
                 <th className="px-6 py-4 border-b text-left">Actions</th>
               </tr>
             </thead>
@@ -79,22 +104,44 @@ function AjoutServProx() {
                 <tr
                   key={server.id}
                   className={`cursor-pointer ${selectedServer?.id === server.id ? "bg-teal-100" : ""} hover:bg-teal-50`}
-                  onClick={() => setSelectedServer(server)}
+                  onClick={() => {
+                    setSelectedServer(server); // Sélectionner le serveur
+                    navigateToNextPage(server); // Naviguer vers la page suivante
+                  }}
                 >
                   <td className="px-6 py-4 border-b">{server.serverIp}</td>
                   <td className="px-6 py-4 border-b">{server.node}</td>
                   <td className="px-6 py-4 border-b">{server.user}</td>
                   <td className="px-6 py-4 border-b">{server.password}</td>
+                  <td className="px-6 py-4 border-b">
+                    <select className="w-full p-2 border rounded">
+                      {server.templates.map((template, index) => (
+                        <option key={index} value={template.name}>
+                          {template.name}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-6 py-4 border-b">
+                    <select className="w-full p-2 border rounded">
+                      {server.templates.map((template, index) => (
+                        <option key={index} value={template.id}>
+                          {template.id}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
                   <td className="px-6 py-4 border-b text-center">
-                    {server.status === "stopped" ? (
-                      <button onClick={() => startServer(server.id)} className="text-green-500 hover:text-green-700">
-                        <FontAwesomeIcon icon={faPlay} />
-                      </button>
-                    ) : (
-                      <button onClick={() => stopServer(server.id)} className="text-red-500 hover:text-red-700">
-                        <FontAwesomeIcon icon={faStop} />
-                      </button>
-                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation(); // Empêcher la propagation de l'événement de clic sur la ligne
+                        getTemplates(server); // Exécuter la fonction pour récupérer les templates
+                      }}
+                      className="text-blue-500 hover:text-blue-700 mr-2"
+                      title="Update"
+                    >
+                      <FontAwesomeIcon icon={faSync} />
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -103,7 +150,6 @@ function AjoutServProx() {
         </div>
         <div className="flex justify-between mt-6">
           <button onClick={handlePrevious} className="flex items-center bg-gray-500 text-white p-3 rounded-lg shadow-md hover:bg-gray-600">Back</button>
-          <button onClick={handleNext} className="bg-teal-500 text-white p-2 rounded-lg shadow-md hover:bg-teal-600">Next</button>
         </div>
       </div>
     </div>

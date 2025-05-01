@@ -16,7 +16,6 @@ const CloneTemplate = () => {
   // Fonction pour gérer la soumission du formulaire
   const handleSubmit = async (e) => {
     e.preventDefault();
-    navigate("/formulaire");
 
     const data = {
       sourceProxmoxIp,

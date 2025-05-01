@@ -1,0 +1,35 @@
+become: true
+hosts: namenode
+name: "D\xE9marrer les services Hadoop"
+tasks:
+- args:
+    executable: /bin/bash
+  name: "Mettre \xE0 jour hadoop-env.sh pour d\xE9finir JAVA_HOME"
+  shell: if grep -q '^export JAVA_HOME=' /opt/hadoop/etc/hadoop/hadoop-env.sh; then
+    sed -i 's|^export JAVA_HOME=.*|export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64|'
+    /opt/hadoop/etc/hadoop/hadoop-env.sh; else echo 'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64'
+    >> /opt/hadoop/etc/hadoop/hadoop-env.sh fi
+- file:
+    group: molka
+    mode: '0755'
+    owner: molka
+    path: /opt/hadoop/logs
+    state: directory
+  name: "Cr\xE9er le r\xE9pertoire /opt/hadoop/logs si n\xE9cessaire"
+- args:
+    creates: /opt/hadoop/hdfs/name/current/VERSION
+  become_user: molka
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+  executable: /bin/bash
+  name: "Formater le NameNode (si n\xE9cessaire)"
+  shell: /opt/hadoop/bin/hdfs namenode -format -force
+- become_user: molka
+  environment:
+    HDFS_DATANODE_USER: molka
+    HDFS_NAMENODE_USER: molka
+    HDFS_SECONDARYNAMENODE_USER: molka
+    JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+  executable: /bin/bash
+  name: "D\xE9marrer HDFS"
+  shell: /opt/hadoop/sbin/start-dfs.sh

@@ -6,10 +6,16 @@ import paramiko
 import subprocess
 import time
 import requests
+import logging
+from jinja2 import Environment, FileSystemLoader
+import sys
+import json
+import re
+from datetime import datetime, timezone
 #################################################
 import os
-import re
 import traceback
+from pathlib import Path
 import random
 import shutil
 import platform
@@ -22,75 +28,85 @@ import tempfile
 
 app = Flask(__name__)
 CORS(app)
-NODE_MAPPING = {
-    "192.168.1.5": "serveur1",
-    "192.168.1.100": "serveur",
-}
+# Liste pour stocker les serveurs (en mémoire)
+servers = []
 
-
-# Fonction de connexion à Proxmox
-def connect_to_proxmox(proxmoxIp, username, password):
-    url = f"https://{proxmoxIp}:8006/api2/json/access/ticket"
-    payload = {
-        'username': username,
-        'password': password
-    }
-
-    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
-
-    response = requests.post(url, data=payload, verify=False)
-    
-    if response.status_code == 200:
-        return response.json()['data']
-    else:
-        raise Exception("Échec de la connexion avec Proxmox: " + response.text)
-    #################################################################################################################################
-@app.route("/add_server", methods=["POST"])
+@app.route('/add_server', methods=['POST'])
 def add_server():
-    # Récupérer les données envoyées par le frontend
-    data = request.get_json()
-    proxmox_ip = data.get("serverIp")
-    node = data.get("node")
-    user = data.get("user")
-    password = data.get("password")
+    data = request.json
+    server_ip = data.get('serverIp')
+    node = data.get('node')
+    user = data.get('user')
+    password = data.get('password')
 
-    # Exemple d'URL pour l'API Proxmox, à adapter selon ton cas
-    proxmox_url = f"https://{proxmox_ip}:8006/api2/json/nodes/{node}/status"
+    # Vérification des champs obligatoires
+    if not all([server_ip, node, user, password]):
+        return jsonify({"success": False, "message": "Missing required fields"}), 400
 
-    # Authentification avec l'API Proxmox
-    auth = (user, password)
+    # Ajouter le serveur à la liste
+    new_server = {
+        "serverIp": server_ip,
+        "node": node,
+        "user": user,
+        "password": password
+    }
+    servers.append(new_server)
 
-    # Essayer de récupérer l'état du serveur ou effectuer une autre action via l'API
+    return jsonify({"success": True, "message": "Server added successfully"})
+###################################################
+
+@app.route('/connect_and_get_templates', methods=['POST'])
+def connect_and_get_templates():
+    data = request.json
+    proxmox_ip = data.get('proxmox_ip')
+    username = data.get('username')
+    password = data.get('password')
+
+    # Vérification des champs obligatoires
+    if not all([proxmox_ip, username, password]):
+        return jsonify({"success": False, "error": "Tous les champs obligatoires (proxmox_ip, username, password) doivent être fournis."}), 400
+
+    ssh = None  # Initialiser la variable ssh pour la fermeture dans le bloc finally
     try:
-        response = requests.get(proxmox_url, auth=auth, verify=False)  # verify=False pour ignorer SSL (à ne pas faire en production)
-        if response.status_code == 200:
-            return jsonify({"status": "success", "message": "Serveur ajouté avec succès"})
-        else:
-            return jsonify({"status": "error", "message": "Erreur avec l'API Proxmox"}), 400
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # Connexion SSH au serveur Proxmox
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(proxmox_ip, username=username, password=password, timeout=10)  # Ajouter un timeout
 
-    #################################################################################################################################
-    # Fonction pour récupérer la RAM totale
-@app.route('/get_limits', methods=['GET'])
-def get_limits():
-    try:
-        ram_result = subprocess.check_output(["powershell", "-Command", "Get-ComputerInfo | Select-Object -ExpandProperty CsTotalPhysicalMemory"], text=True).strip()
-        cpu_result = subprocess.check_output(["powershell", "-Command", "Get-WmiObject -Class Win32_Processor | Select-Object NumberOfLogicalProcessors"], text=True).strip()
-        
-        # Convertir la RAM de bytes à Mo
-        total_ram_mb = int(ram_result) / (1024 * 1024)
-        total_cpu = int(cpu_result.split()[-1])
+        # Exécution de la commande `qm list`
+        stdin, stdout, stderr = ssh.exec_command("qm list")
+        output = stdout.read().decode()
+        error_output = stderr.read().decode()
+
+        # Vérifier s'il y a des erreurs
+        if error_output:
+            raise Exception(f"Erreur lors de l'exécution de la commande 'qm list' : {error_output}")
+
+        # Extraction des templates et leurs IDs
+        templates = []
+        for line in output.splitlines()[1:]:  # Ignorer la première ligne (en-tête)
+            parts = line.split()
+            if len(parts) > 1:
+                template_id = parts[0]  # L'ID du template est dans la première colonne
+                template_name = parts[1]  # Le nom du template est dans la deuxième colonne
+                templates.append({"id": template_id, "name": template_name})  # Ajouter un objet avec ID et nom
 
         return jsonify({
-            "max_ram": int(total_ram_mb),
-            "max_cpu": total_cpu
+            "success": True,
+            "message": "Connexion réussie",
+            "templates": templates  # Retourner la liste des templates avec leurs IDs
         })
+    except paramiko.AuthenticationException:
+        return jsonify({"success": False, "error": "Échec de l'authentification SSH. Vérifiez les informations d'identification."}), 401
+    except paramiko.SSHException as e:
+        return jsonify({"success": False, "error": f"Échec de la connexion SSH : {str(e)}"}), 500
     except Exception as e:
-        return jsonify({"error": str(e)})
+        return jsonify({"success": False, "error": f"Erreur inattendue : {str(e)}"}), 500
+    finally:
+        if ssh:  # Fermer la connexion SSH si elle a été établie
+            ssh.close()
 
 #################################################################################################################################
-
 @app.route('/clone_template', methods=['POST'])
 def clone_template():
     try:
@@ -106,18 +122,34 @@ def clone_template():
         password = data.get('password')
         target_vm_id = data.get('target_vm_id', 9000)
 
+        # Validation des champs requis
         if not all([source_proxmox_ip, target_proxmox_ip, template_id, username, password]):
             return jsonify({"success": False, "message": "Tous les champs sont requis"}), 400
 
+        # Validation de template_id
+        try:
+            template_id = int(template_id)
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "message": "template_id doit être un nombre entier valide"}), 400
+
         print(f"[INFO] Export de la VM {template_id} depuis {source_proxmox_ip}")
-        vzdump_command = f"vzdump {template_id} --dumpdir /var/lib/vz/dump --mode stop --compress zstd"
 
         # Connexion SSH au serveur source
         ssh_source = paramiko.SSHClient()
         ssh_source.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh_source.connect(source_proxmox_ip, username=username, password=password)
+        ssh_source.connect(source_proxmox_ip, username=username, password=password, timeout=30)
+
+        # Vérifier si le template existe
+        check_template_command = f"qm list | grep {template_id}"
+        stdin, stdout, stderr = ssh_source.exec_command(check_template_command)
+        template_exists = stdout.read().decode().strip()
+
+        if not template_exists:
+            ssh_source.close()
+            return jsonify({"success": False, "message": f"Le template avec l'ID {template_id} n'existe pas sur le serveur source"}), 400
 
         # Exécution de la commande vzdump
+        vzdump_command = f"vzdump {template_id} --dumpdir /var/lib/vz/dump --mode stop --compress zstd"
         stdin, stdout, stderr = ssh_source.exec_command(vzdump_command)
         exit_status = stdout.channel.recv_exit_status()
         vzdump_error = stderr.read().decode()
@@ -181,7 +213,27 @@ def clone_template():
             return jsonify({"success": False, "message": f"Erreur lors de la restauration : {restore_error}"}), 500
 
         print(f"[SUCCESS] Clonage réussi sur {target_proxmox_ip} avec l'ID {target_vm_id}")
-        return jsonify({"success": True, "message": f"Clonage réussi sur {target_proxmox_ip} avec l'ID {target_vm_id}"}), 200
+
+        # Appeler create_vmprox et conf_vmprox après la restauration
+        create_data = {
+            "proxmoxIp": target_proxmox_ip,
+            "password": password,
+            "hostname": "molkatest",
+            "targetNode": "serveur",  # Remplacez par le nœud cible approprié
+            "network": "bridged",  # Type de réseau par défaut
+            "template": "ubuntu-template",  # Template par défaut
+            "vm_id": template_id
+        }
+        create_response = requests.post(
+                    "http://localhost:5000/create_vmprox",
+                    json=create_data,
+                    headers={"Content-Type": "application/json"}
+                )
+        if create_response.status_code != 200:
+            return create_response
+
+
+        return jsonify({"success": True, "message": f"Clonage, création et configuration réussis sur {target_proxmox_ip} avec l'ID {target_vm_id}"}), 200
 
     except Exception as e:
         print(f"[EXCEPTION] {str(e)}")
@@ -206,179 +258,102 @@ def find_latest_vzdump(ssh_client, template_id):
     print(f"[DEBUG] Fichier trouvé : {vzdump_path}")
     return vzdump_path if vzdump_path else None
 
+
+
+##############################################################################################################""
+
+
 #################################################################################################################################
-@app.route('/create_vmprox', methods=['POST'])  
-def create_vmprox():
-    data = request.json
-    vm_id = request.form.get('vm_id')
-    print(data)  
 
-    proxmoxIp = data.get('proxmoxIp')  
-    password = data.get('password')
-    hostname = data.get('hostname')
-    ram = data.get('ram')
-    cpu = data.get('cpu')
-    target_node = data.get('targetNode')
-    network = data.get('network', 'nat')  
-    vm_id = data.get('vm_id')  # Corriger ici
-    if not all([proxmoxIp, password, hostname, ram, cpu, target_node, vm_id]):
-        return jsonify({"error": "Missing required fields"}), 400
-    # Créer un fichier variables.tfvars pour Terraform
-    terraform_vars = f"""
-proxmox_ip = "{proxmoxIp}"
-password = "{password}"
-hostname = "{hostname}"
-ram = {ram}
-cpu = {cpu}
-target_node = "{target_node}"
-network_ip = "{network}"
-vm_id = {vm_id} 
-"""
-
-    with open('variables.tfvars', 'w') as f:
-        f.write(terraform_vars.strip())  # Enlever les espaces inutiles
-
-    # Exécuter Terraform
-    try:
-        # Initialisation de Terraform
-        print("Initializing Terraform...")
-        subprocess.run(["terraform", "init"], check=True)
-        print("Terraform initialized.")
-        
-        # Exécution de la commande Terraform pour créer la VM en clonant le template
-        print("Creating VM with Terraform...")
-        result = subprocess.run(["terraform", "apply", "-auto-approve", "-var-file=variables.tfvars"], capture_output=True, text=True)
-
-        # Vérifiez si l'erreur "plugin crashed" apparaît dans la sortie
-        if "Error: The terraform-provider-proxmox_v2.9.11.exe plugin crashed!" in result.stderr:
-            print("Terraform plugin crash detected, proceeding with conf_vm...")
-            # Appeler la fonction conf_vm ici
-            conf_vmprox()
-
-        print("VM created successfully.")
-        return jsonify({"message": f"VM {vm_id} cloned from template {hostname} successfully!"}), 200
-
-    except subprocess.CalledProcessError as e:
-        print(f"Error during Terraform execution: {e}")
-        return jsonify({"error": "Failed to create VM"}), 500
-    #################################################################################################################################
-@app.route('/conf_vmprox', methods=['POST'])
-def conf_vmprox():
-    data = request.json
-
-    proxmoxIp = data.get('proxmoxIp')
-    password = data.get('password')
-    username = 'root'
-    vm_id = data.get('vm_id')
-    ram = data.get('ram')
-    cpu = data.get('cpu')
-
-    if not all([proxmoxIp, password, vm_id, ram, cpu]):
-        return jsonify({"error": "Missing required fields"}), 400
-
-    # Création de la session SSH
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    try:
-        # Connexion SSH à Proxmox
-        print(f"Connecting to Proxmox server at {proxmoxIp}...")
-        ssh.connect(proxmoxIp, username=username, password=password, look_for_keys=False)
-        print(f"Connected to {proxmoxIp}")
-
-        # Commande pour configurer la VM (mémoire et CPU)
-        command = f"qm set {vm_id} --memory {ram} --cores {cpu}"
-        print(f"Running command: {command}")
-        stdin, stdout, stderr = ssh.exec_command(command)
-
-        # Lire la sortie et les erreurs
-        output = stdout.read().decode()
-        error = stderr.read().decode()
-        print(f"Command output: {output}")
-        if error:
-            print(f"Command error: {error}")
-            return jsonify({"error": f"Error: {error}"}), 500
-
-        # Démarrer la VM si elle n'est pas en cours d'exécution
-        start_command = f"qm start {vm_id}"
-        print(f"Running start command: {start_command}")
-        stdin, stdout, stderr = ssh.exec_command(start_command)
-        start_output = stdout.read().decode()
-        start_error = stderr.read().decode()
-        if start_error:
-            print(f"Start command error: {start_error}")
-            return jsonify({"error": f"Error starting VM: {start_error}"}), 500
-        print(f"VM started: {start_output}")
-
-        # Attendre 30 secondes pour que la VM récupère son IP
-        print("Waiting 30 seconds for the VM to initialize and get an IP address...")
-        time.sleep(60)
-
-        # Récupérer l'adresse IP avec la commande 'qm guest exec'
-        ip_command = f"qm guest exec {vm_id} -- ip a"
-        print(f"Running IP fetch command: {ip_command}")
-        stdin, stdout, stderr = ssh.exec_command(ip_command)
-        ip_output = stdout.read().decode()
-        ip_error = stderr.read().decode()
-
-        if ip_error:
-            print(f"IP fetch command error: {ip_error}")
-            return jsonify({"error": f"Error fetching IP address: {ip_error}"}), 500
-
-        print(f"VM IP address information: {ip_output}")
-
-        return jsonify({"message": "VM configured and started successfully!", "ip_info": ip_output})
-
-    except Exception as e:
-        print(f"Error during SSH connection or execution: {e}")
-        return jsonify({"error": f"Error during SSH connection or execution: {str(e)}"}), 500
-    finally:
-        # Fermer la connexion SSH
-        ssh.close()
-
-
-    #################################################################################################################################
-    
+#################################################################################################################################
+#################################################################################################################################
 @app.route('/start_vmprox', methods=['POST'])
 def start_vmprox():
     try:
-        data = request.json  # Récupère les données JSON envoyées
-        proxmox_ip = data.get('proxmox_ip')
+        # 1. Normalisation des noms de champs
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        # Normaliser les noms de champs (gère 'proxmox_ip' et 'proxmoxIp')
+        proxmox_ip = data.get('proxmox_ip') or data.get('proxmoxIp')
         username = data.get('username')
         password = data.get('password')
         vm_id = data.get('vm_id')
 
-        # Création de la session SSH
+        # 2. Validation des champs obligatoires
+        missing_fields = []
+        if not proxmox_ip:
+            missing_fields.append("proxmox_ip")
+        if not username:
+            missing_fields.append("username")
+        if not password:
+            missing_fields.append("password")
+        if not vm_id:
+            missing_fields.append("vm_id")
+
+        if missing_fields:
+            return jsonify({
+                "error": "Missing required fields",
+                "missing": missing_fields,
+                "received": list(data.keys())
+            }), 400
+
+        # 3. Connexion SSH améliorée
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        try:
+            ssh.connect(
+                hostname=proxmox_ip,
+                username=username,
+                password=password,
+                timeout=15
+            )
+        except paramiko.AuthenticationException:
+            return jsonify({"error": "Authentication failed"}), 401
+        except Exception as e:
+            return jsonify({"error": f"Connection error: {str(e)}"}), 502
 
-        # Connexion au serveur Proxmox
-        ssh.connect(proxmox_ip, username=username, password=password)
+        # 4. Exécution de la commande avec gestion du timeout
+        try:
+            command = f"qm start {vm_id}"
+            stdin, stdout, stderr = ssh.exec_command(command, timeout=20)
+            
+            # Attendre la complétion
+            exit_status = stdout.channel.recv_exit_status()
+            output = stdout.read().decode().strip()
+            error = stderr.read().decode().strip()
+            time.sleep(90)
 
-        # Commande à exécuter pour démarrer la VM
-        command = f"qm start {vm_id}"
 
-        # Exécution de la commande
-        stdin, stdout, stderr = ssh.exec_command(command)
+            if exit_status == 0:
+                return jsonify({
+                    "status": "success",
+                    "vm_id": vm_id,
+                    "message": output or "VM started successfully"
+                }), 200
+            else:
+                return jsonify({
+                    "error": error or f"Failed to start VM (exit code: {exit_status})",
+                    "vm_id": vm_id
+                }), 500
 
-        # Lecture de la sortie de la commande
-        output = stdout.read().decode()
-        error = stderr.read().decode()
-
-        if output:
-            return jsonify({"message": f"VM started successfully: {output}"}), 200
-        if error:
-            return jsonify({"error": f"Error: {error}"}), 500
-
-        return jsonify({"status": "success", "message": "Machine virtuelle démarrée avec succès!"})
+        except Exception as e:
+            return jsonify({
+                "error": f"Command execution failed: {str(e)}",
+                "vm_id": vm_id
+            }), 500
 
     except Exception as e:
-        # Retourner une erreur si quelque chose se passe mal
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "error": "Internal server error",
+            "details": str(e)
+        }), 500
 
     finally:
-        # Fermeture de la connexion SSH
-        ssh.close()
+        if 'ssh' in locals():
+            ssh.close()
 
     #################################################################################################################################
 @app.route('/stop_vmprox', methods=['POST'])
@@ -459,78 +434,2831 @@ def delete_vmprox   ():
     #################################################################################################################################
 @app.route('/open_console', methods=['POST'])
 def open_console():
-        try:
-            data = request.json
-            print("Données reçues pour la console :", data)
+    data = request.json  # Récupérer les données JSON de la requête POST
+    vm_ip = data.get('vmIp')  # Adresse IP de la VM
+    username = data.get('username')  # Nom d'utilisateur SSH
+    password = data.get('password')  # Mot de passe SSH
 
-            proxmoxIp = data.get('proxmoxIp')
-            username = data.get('username')
-            password = data.get('password')
+    if not all([vm_ip, username, password]):
+        return jsonify({"error": "Missing required fields"}), 400
 
-            if not all([proxmoxIp, username, password]):
-                return jsonify({"error": "Paramètres manquants"}), 400
-
-            # Commande pour ouvrir SSH dans un terminal
-            cmd = f'start cmd /k ssh {username}@{proxmoxIp}'
-            
-            # Exécuter la commande dans un nouveau terminal
-            subprocess.Popen(cmd, shell=True)
-
-            return jsonify({"success": True, "message": "Console ouverte avec succès"}), 200
-
-        except Exception as e:
-            return jsonify({"success": False, "message": str(e)}), 500
-        
-
-
-        #####################################################################################################
- 
-
-@app.route('/migrate_vm', methods=['POST'])
-def migrate_vm():
     try:
-        # Récupérer les données de la requête
-        data = request.get_json()
-        source_proxmox_ip = data.get('sourceProxmoxIp')
-        target_proxmox_ip = data.get('targetProxmoxIp')
-        vm_id = data.get('vm_id')
-        username = data.get('username')
-        password = data.get('password')
+        # Construire la commande SSH
+        ssh_command = f"ssh {username}@{vm_ip}"
 
-        # Valider les données
-        if not all([source_proxmox_ip, target_proxmox_ip, vm_id, username, password]):
-            return jsonify({"success": False, "message": "Tous les champs sont requis"}), 400
+        # Ouvrir un terminal et exécuter la commande SSH
+        if sys.platform == "win32":
+            # Sur Windows, utiliser PowerShell
+            subprocess.Popen(["start", "powershell", "-NoExit", "-Command", ssh_command], shell=True)
+        else:
+            # Sur Linux/Mac, utiliser le terminal natif
+            subprocess.Popen(["gnome-terminal", "--", "bash", "-c", f"{ssh_command}; exec bash"])
 
-        # Récupérer le nom du nœud cible à partir de l'adresse IP
-        target_node = NODE_MAPPING.get(target_proxmox_ip)
-        if not target_node:
-            return jsonify({"success": False, "message": "Adresse IP cible non reconnue"}), 400
+        return jsonify({
+            "success": True,
+            "message": f"Terminal ouvert avec succès. Connexion SSH en cours vers {vm_ip}.",
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Erreur lors de l'ouverture du terminal : {str(e)}",
+        }), 500
+#################################################################################################################################
+@app.route('/conf_vmprox', methods=['POST'])
+def conf_vmprox():
+    data = request.json  # Récupérer les données de la requête POST
+    proxmoxIp = data.get('proxmoxIp')
+    password = data.get('password')
+    username = 'root'
+    vm_id = data.get('vm_id')
 
-        # Commande de migration
-        migrate_command = f"qm migrate {vm_id} {target_node} --online"
+    if not all([proxmoxIp, password, vm_id]):
+        return jsonify({"error": "Missing required fields"}), 400
 
-        # Exécuter la commande sur le serveur source via SSH
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(source_proxmox_ip, username=username, password=password)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-        stdin, stdout, stderr = ssh.exec_command(migrate_command)
-        output = stdout.read().decode()
-        error = stderr.read().decode()
+    try:
+        print(f"Connecting to Proxmox server at {proxmoxIp}...")
+        ssh.connect(proxmoxIp, username=username, password=password, look_for_keys=False)
+        print(f"Connected to {proxmoxIp}")
 
+        # Vérifier l'état de la VM
+        status_command = f"qm status {vm_id}"
+        stdin, stdout, stderr = ssh.exec_command(status_command)
+        status_output = stdout.read().decode()
+        status_error = stderr.read().decode()
+
+        if status_error:
+            print(f"Error checking VM status: {status_error}")
+            return jsonify({"error": f"Error checking VM status: {status_error}"}), 500
+
+        if "running" not in status_output.lower():
+            # Démarrer la VM seulement si elle n'est pas déjà en cours d'exécution
+            start_command = f"qm start {vm_id}"
+            stdin, stdout, stderr = ssh.exec_command(start_command)
+            start_error = stderr.read().decode()
+            if start_error and "already running" not in start_error.lower():
+                print(f"Start command error: {start_error}")
+                return jsonify({"error": f"Error starting VM: {start_error}"}), 500
+            print("VM started successfully.")
+        else:
+            print("VM is already running.")
+
+        # Attendre que la VM soit complètement démarrée
+        print("Waiting for VM to boot up...")
+        time.sleep(90)  # Augmentez ce délai si nécessaire
+
+        # Retrieve the IP address of the VM
+        ip_command = f"qm guest exec {vm_id} -- ip a"
+        print(f"Executing command: {ip_command}")
+        stdin, stdout, stderr = ssh.exec_command(ip_command)
+        ip_output = stdout.read().decode()
+        ip_error = stderr.read().decode()
+
+        if ip_error:
+            print(f"Error executing 'qm guest exec': {ip_error}")
+            return jsonify({"error": f"Error retrieving VM IP: {ip_error}"}), 500
+
+        # Extract the IP address from the output
+        extracted_ip = extract_ip(ip_output)
+        if not extracted_ip:
+            return jsonify({"error": "No IP address found"}), 500
+
+        print("Extracted IP:", extracted_ip)
+        return jsonify({
+            "message": "VM configured and started successfully!",
+            "ip": extracted_ip,  # Inclure l'adresse IP dans la réponse
+        })
+    except Exception as e:
+        print(f"Error during SSH connection or execution: {e}")
+        return jsonify({"error": f"Error during SSH connection or execution: {str(e)}"}), 500
+    finally:
         ssh.close()
 
-        # Vérifier si la migration a réussi
-        if "migration finished" in output:  # Adapter cette condition selon la sortie de la commande
-            return jsonify({"success": True, "message": f"VM {vm_id} migrée avec succès vers {target_node}"})
+def extract_ip(ip_output):
+    try:
+        # Analyser la sortie JSON
+        output_json = json.loads(ip_output)
+        out_data = output_json.get("out-data", "")
+
+        # Chercher l'IP dans la sortie de la commande "ip a"
+        for line in out_data.splitlines():
+            if "inet" in line and "scope global" in line:  # Filtrer les lignes avec "inet" et "scope global"
+                parts = line.split()
+                if len(parts) >= 2:  # Vérifier que la ligne contient une adresse IP
+                    ip_with_prefix = parts[1]  # L'IP se trouve après "inet"
+                    if "/" in ip_with_prefix:  # Vérifier que c'est une adresse IP valide
+                        return f"inet {ip_with_prefix.split('/')[0]}"  # Retourne "inet <adresse_ip>"
+        
+        # Si aucune adresse IPv4 n'est trouvée
+        return None
+    except Exception as e:
+        print(f"Error extracting IP: {e}")
+        return None
+
+#################################################################################################################################
+
+@app.route('/create_vmprox', methods=['POST'])  
+def create_vmprox():
+    # Récupérer les données de la requête
+    data = request.get_json()
+    print("Data received:", data)  
+
+    # Validation des données requises
+    required_fields = ['proxmoxIp', 'password', 'hostname', 'targetNode', 'vm_id']
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    # Extraction des données
+    proxmox_ip = data.get('proxmoxIp')  
+    password = data.get('password')
+    hostname = data.get('hostname')
+    target_node = data.get('targetNode')
+    network = data.get('network', 'nat')  
+    vm_id = data.get('vm_id')
+    template = data.get('template', 'lubuntu-template')
+
+    # Préparation des variables Terraform
+    terraform_vars = f"""
+proxmox_ip = "{proxmox_ip}"
+password = "{password}"
+hostname = "{hostname}"
+target_node = "{target_node}"
+network_ip = "{network}"
+vm_id = {vm_id}
+template = "{template}"
+"""
+
+    # Écriture du fichier de variables Terraform
+    with open('variables.tfvars', 'w') as f:
+        f.write(terraform_vars.strip())
+
+    try:
+        print("Initializing Terraform...")
+        subprocess.run(["terraform", "init"], check=True)
+        
+        print("Applying Terraform configuration...")
+        result = subprocess.run(
+            ["terraform", "apply", "-auto-approve", "-var-file=variables.tfvars"],
+            capture_output=True,
+            text=True
+        )
+
+        # Vérifiez si l'erreur "plugin crashed" apparaît dans la sortie
+        if "Error: The terraform-provider-proxmox_v2.9.11.exe plugin crashed!" in result.stderr:
+            print("Terraform plugin crash detected, proceeding with conf_vm...")
+            # Appeler la fonction conf_vm ici
+            time.sleep(120)
+
+        print("VM created successfully")
+        return jsonify({
+            "message": f"VM {vm_id} created successfully",
+            "ip": "IP_TO_BE_DETERMINED"  # Vous devrez implémenter cette partie
+        }), 200
+
+    except subprocess.CalledProcessError as e:
+        print(f"Subprocess error: {str(e)}")
+        return jsonify({"error": f"Terraform execution failed: {str(e)}"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+ #################################################################################################################################
+ # #################################################################################################################################   
+@app.route('/get_vmip', methods=['POST'])
+def get_vmip():
+    data = request.json
+    proxmox_ip = data.get('proxmoxIp')
+    password = data.get('password')
+    vm_id = data.get('vm_id')
+
+    if not all([proxmox_ip, password, vm_id]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        ssh.connect(proxmox_ip, username='root', password=password, timeout=15)
+
+        # Vérification du statut de la VM
+        status_cmd = f"qm status {vm_id}"
+        stdin, stdout, stderr = ssh.exec_command(status_cmd)
+        if "running" not in stdout.read().decode().lower():
+            return jsonify({"error": "VM is not running"}), 400
+
+        # Exécution de la commande IP
+        ip_command = f"qm guest exec {vm_id} -- ip a"
+        stdin, stdout, stderr = ssh.exec_command(ip_command)
+        raw_output = stdout.read().decode().strip()
+        error_output = stderr.read().decode()
+
+        if error_output:
+            return jsonify({"error": f"Command failed: {error_output}"}), 500
+
+        if not raw_output:
+            return jsonify({"error": "Empty response from command"}), 500
+
+        # Extraction de l'IP
+        ip_address = extract_ip_from_output(raw_output)
+        if not ip_address:
+            return jsonify({"error": "No valid IP address found"}), 500
+
+        return jsonify({
+            "message": "IP retrieved successfully",
+            "ip": f"inet {ip_address}"
+        })
+
+    except paramiko.ssh_exception.AuthenticationException:
+        return jsonify({"error": "SSH authentication failed"}), 401
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+    finally:
+        ssh.close()
+
+def extract_ip_from_output(raw_output):
+    """Extrait l'IP de la sortie brute"""
+    try:
+        import re
+        # Recherche toutes les IPs non loopback
+        ip_matches = re.findall(r'inet (192\.168\.[0-9]+\.[0-9]+)', raw_output)
+        for ip in ip_matches:
+            if ip != '127.0.0.1':
+                return ip
+        return None
+    except Exception as e:
+        print(f"IP extraction error: {str(e)}")
+        return None
+#################################################################################################################################
+#Cluster Proxmox et configuration géneration des fichiers ansible
+#####################################################################################################
+logging.basicConfig(filename='hadoop_deploy.log', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def log_step(message):
+    logger.info(f"[{datetime.now()}] {message}")
+    print(message)
+
+# ==================== CONSTANTES ====================
+@app.route('/clustercreate_vmprox', methods=['POST'])
+def clustercreate_vmprox():
+        data = request.get_json()
+        print(f"Starting cluster creation: {data['cluster_name']}")
+        
+        # Validation des données
+        required = ['proxmox_ip', 'password', 'target_node', 'vm_id_start',
+                   'template', 'cluster_name', 'node_count']
+        if not all(field in data for field in required):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        vm_id = int(data['vm_id_start'])
+        results = []
+        ip_map = {}
+        errors = []
+
+        # 1ère BOUCLE: Création de toutes les machines
+        print("=== PHASE 1: Création des VMs ===")
+        vm_ids = []
+        for i in range(data['node_count'] + 1):  # +1 pour l'ansible
+            is_ansible = (i == data['node_count'])
+            vm_type = "ansible" if is_ansible else "namenode" if i == 0 else "datanode"
+            hostname = f"{data['cluster_name']}-{vm_type}-{i}" if not is_ansible else f"ansible-{data['cluster_name']}"
+            current_vm_id = str(vm_id + i)
+            vm_ids.append(current_vm_id)
+            
+            try:
+                create_data = {
+                    "proxmoxIp": data['proxmox_ip'],
+                    "password": data['password'],
+                    "hostname": hostname,
+                    "targetNode": data['target_node'],
+                    "vm_id": current_vm_id,
+                    "template": data['template'],
+                    "network": data.get('network_type', 'nat'),
+                    "vm_type": vm_type
+                }
+                
+                create_response = create_vmprox_direct(create_data)
+                
+                if create_response[1] != 200:
+                    error_msg = create_response[0].get_json().get('error', '')
+                    if "plugin crashed" in error_msg:
+                        print(f"[VM {current_vm_id}] Warning: Terraform plugin crashed but continuing")
+                        results.append({
+                            "vm_id": current_vm_id,
+                            "type": vm_type,
+                            "status": "created_with_warning",
+                            "warning": "Terraform plugin crashed"
+                        })
+                    else:
+                        raise Exception(f"Creation failed: {error_msg}")
+                else:
+                    print(f"[VM {current_vm_id}] Successfully created")
+                    results.append({
+                        "vm_id": current_vm_id,
+                        "type": vm_type,
+                        "status": "created"
+                    })
+
+            except Exception as e:
+                error_msg = f"[VM {current_vm_id}] Creation error: {str(e)}"
+                print(error_msg)
+                errors.append(error_msg)
+                results.append({
+                    "vm_id": current_vm_id,
+                    "type": vm_type,
+                    "status": "failed",
+                    "error": str(e)
+                })
+
+        # 2ème BOUCLE: Démarrage des machines et attente
+        print("\n=== PHASE 2: Démarrage des VMs ===")
+        for vm in results:
+            if vm['status'] not in ['created', 'created_with_warning']:
+                continue
+                
+            current_vm_id = vm['vm_id']
+            try:
+                print(f"[VM {current_vm_id}] Starting...")
+                start_response = start_vmprox_direct({
+                    "proxmox_ip": data['proxmox_ip'],
+                    "username": "root",
+                    "password": data['password'],
+                    "vm_id": current_vm_id
+                })
+                
+                if start_response[1] != 200:
+                    raise Exception(f"Start failed: {start_response[0].get_json()}")
+                
+                print(f"[VM {current_vm_id}] Waiting 90 seconds...")
+                time.sleep(90)  # Attente fixe pour toutes les VMs
+                vm['status'] = "started"
+
+            except Exception as e:
+                error_msg = f"[VM {current_vm_id}] Start error: {str(e)}"
+                print(error_msg)
+                errors.append(error_msg)
+                vm['status'] = "start_failed"
+                vm['error'] = str(e)
+
+        # 3ème BOUCLE: Récupération des IPs
+        ansible_ip = None
+        namenode_ip = None
+        datanode_ips = []
+        retry_attempts = 10  # Nombre de tentatives
+        retry_delay = 30    # Délai d'attente entre les tentatives en secondes
+
+        for vm in results:
+            if vm['status'] != 'started':
+                continue
+                
+            current_vm_id = vm['vm_id']
+            vm_type = vm['type']
+            
+            for attempt in range(retry_attempts):
+                try:
+                    print(f"[VM {current_vm_id}] Tentative {attempt + 1}/{retry_attempts} pour obtenir l'IP... (Type: {vm_type})")
+                    ip_data, status_code = get_vmip_direct({
+                        "proxmoxIp": data['proxmox_ip'],
+                        "password": data['password'],
+                        "vm_id": current_vm_id
+                    })
+                    
+                    if status_code != 200:
+                        raise Exception(f"Erreur: {ip_data.get('error', 'Inconnue')}")
+                    
+                    vm_ip = ip_data['ip'] if isinstance(ip_data, dict) else ip_data
+                    vm_ip = vm_ip.strip().replace("inet ", "")
+                    vm['ip'] = vm_ip
+                    
+                    # Log spécifique pour le nœud Ansible
+                    if vm_type == "ansible":
+                        ansible_ip = vm_ip
+                        print(f"!!! NŒUD ANSIBLE TROUVÉ !!! IP: {ansible_ip} (VM ID: {current_vm_id})")
+                    elif vm_type == "namenode":
+                        namenode_ip = vm_ip
+                    elif vm_type == "datanode":
+                        datanode_ips.append(vm_ip)
+
+                    if vm_type not in ip_map:
+                        ip_map[vm_type] = []
+                    ip_map[vm_type].append(vm_ip)
+                    
+                    print(f"[VM {current_vm_id}] IP attribuée: {vm_ip}")
+                    break  # Sortir de la boucle si l'IP a été récupérée avec succès
+
+                except Exception as e:
+                    error_msg = f"[VM {current_vm_id}] Erreur IP: {str(e)}"
+                    print(error_msg)
+                    errors.append(error_msg)
+                    vm['status'] = "ip_failed"
+                    vm['error'] = str(e)
+
+                    if attempt < retry_attempts - 1:
+                        print(f"Aucune IP obtenue, attente de {retry_delay} secondes avant de réessayer...")
+                        time.sleep(retry_delay)  # Attendre avant de réessayer
+
+        # Vérification finale des IPs
+        if not ansible_ip:
+            raise Exception("ERREUR CRITIQUE: Aucune IP trouvée pour le nœud Ansible")
+
+        print(f"""
+        === VÉRIFICATION IP ===
+        IP Ansible: {ansible_ip}
+        IP NameNode: {ip_map.get('namenode', ['N/A'])[0]}
+        IP DataNodes: {', '.join(ip_map.get('datanode', []))}
+        """)
+
+        # Vérification des IPs récupérées
+        if not ansible_ip or not namenode_ip or len(datanode_ips) < 2:
+            raise Exception("ERREUR CRITIQUE: Aucune IP trouvée pour le nœud Ansible ou NameNode/Datanodes manquants.")
+
+        # 4ème PHASE: Configuration Ansible et installation Hadoop
+        def execute_ssh_command(ssh, command):
+            """Exécute une commande SSH et retourne le résultat"""
+            stdin, stdout, stderr = ssh.exec_command(command)
+            exit_status = stdout.channel.recv_exit_status()
+            output = stdout.read().decode().strip()
+            error = stderr.read().decode().strip()
+            return exit_status, output, error
+
+        def create_ssh_client(host):
+            """Crée une connexion SSH"""
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                ssh.connect(
+                    host, 
+                    username="molka", 
+                    password="molka",
+                    look_for_keys=False,
+                    allow_agent=False,
+                    timeout=30
+                )
+                return ssh
+            except Exception as e:
+                print(f"Échec de connexion SSH à {host}: {str(e)}")
+                return None
+
+        # Installe Hadoop sur le nœud contrôleur.
+        try:
+            # Créer une connexion SSH vers le contrôleur Ansible
+            ssh = create_ssh_client(ansible_ip)
+            if not ssh:
+                print("Échec de la connexion SSH.")
+                return False
+
+            # Télécharger Hadoop
+            commands = [
+                'sudo apt update && sudo apt install -y wget openjdk-11-jdk net-tools sshpass pdsh',
+                'sudo apt install -y python3 python3-pip',
+                'sudo apt install -y ansible',
+                
+                'mkdir -p ~/.ssh',
+                '[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa',
+                f'ssh-keyscan -H {ansible_ip} >> ~/.ssh/known_hosts',
+                f'ssh-keyscan -H {namenode_ip} >> ~/.ssh/known_hosts',
+                f'ssh-keyscan -H {datanode_ips } >> ~/.ssh/known_hosts',
+
+                f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{ansible_ip}',
+                f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{namenode_ip}',
+                f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{datanode_ips[0]}',
+                f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{datanode_ips[1]}',
+
+                'chmod 600 ~/.ssh/id_rsa',
+                'chmod 644 ~/.ssh/id_rsa.pub',
+                'chmod 700 ~/.ssh',
+                
+                'wget https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz',
+                'sudo mv hadoop-3.3.1.tar.gz /opt',
+                'sudo chown -R molka:molka /opt',
+
+                'echo "export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> /home/molka/.bashrc',
+                'echo "export HADOOP_HOME=/opt/hadoop" >> /home/molka/.bashrc',
+                'echo "export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin" >> /home/molka/.bashrc',
+                # Copie du .bashrc sur les différents nœuds
+                f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{ansible_ip}:/home/molka/.bashrc',
+                f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{namenode_ip}:/home/molka/.bashrc',
+                f'for datanode in {" ".join(datanode_ips)}; do sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@${{datanode}}:/home/molka/.bashrc; done',
+
+
+                'mkdir -p ~/templates',
+                'echo "<configuration>\n  <property>\n    <name>fs.defaultFS</name>\n    <value>hdfs://{{ namenode_hostname }}:9000</value>\n  </property>\n</configuration>" > ~/templates/core-site.xml.j2',
+                'echo "<configuration>\n  <property>\n    <name>dfs.replication</name>\n    <value>2</value>\n  </property>\n</configuration>" > ~/templates/hdfs-site.xml.j2',
+                'echo "<configuration>\n  <property>\n    <name>yarn.resourcemanager.hostname</name>\n    <value>{{ namenode_hostname }}</value>\n  </property>\n</configuration>" > ~/templates/yarn-site.xml.j2',
+                'echo "<configuration>\n  <property>\n    <name>mapreduce.framework.name</name>\n    <value>yarn</value>\n  </property>\n</configuration>" > ~/templates/mapred-site.xml.j2',
+                'echo "{{ groups[\'namenode\'][0] }}" > ~/templates/masters.j2',
+                'echo "{% for worker in groups[\'datanodes\'] %}\n{{ worker }}\n{% endfor %}" > ~/templates/workers.j2',
+                'echo "# ANSIBLE GENERATED CLUSTER HOSTS\n{% for host in groups[\'all\'] %}\n{{ hostvars[host][\'ansible_host\'] }} {{ host }}\n{% endfor %}" > ~/templates/hosts.j2',
+                f'echo "[namenode]\n{namenode_ip} ansible_host={namenode_ip}\n\n[datanodes]\n{datanode_ips[0]} ansible_host={datanode_ips[0]}\n{datanode_ips[1]} ansible_host={datanode_ips[1]}\n\n[all:vars]\nansible_user=molka\nansible_ssh_private_key_file=~/.ssh/id_rsa\nansible_ssh_common_args=\'-o StrictHostKeyChecking=no\'\nansible_python_interpreter=/usr/bin/python3" > ~/inventory.ini',
+                f'echo """[namenode]\n{namenode_ip} ansible_host={namenode_ip}\n\n[datanodes]\n{datanode_ips[0]} ansible_host={datanode_ips[0]}\n{datanode_ips[1]} ansible_host={datanode_ips[1]}\n\n[resource_manager]\n{namenode_ip} ansible_host={namenode_ip}\n\n[all:vars]\nansible_user=molka\nansible_ssh_private_key_file=~/.ssh/id_rsa\nansible_ssh_common_args=\'-o StrictHostKeyChecking=no\'\nansible_python_interpreter=/usr/bin/python3""" > ~/inventory.ini'
+            ]
+            for command in commands:
+                exit_status, output, error = execute_ssh_command(ssh, command)
+                if exit_status != 0:
+                    print(f"Erreur lors de l'exécution de: {command}\n{error}")
+                    ssh.close()
+                    return False  # Arrêter dès qu'une commande échoue
+                    
+            # Définir les playbooks avec une syntaxe YAML correcte
+            playbooks = {
+                'deploy_hadoop.yml': """---
+- name: Déploiement Hadoop via extraction
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # 1. Créer /opt si nécessaire
+    - name: Créer répertoire /opt
+      file:
+        path: /opt
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # 2. Installer les dépendances
+    - name: Installer paquets requis
+      apt:
+        name:
+          - openjdk-11-jdk
+          - sshpass
+          - net-tools
+          - pdsh
+          - rsync
+          - tar
+        state: present
+        update_cache: yes
+
+    - name: Transférer Hadoop via SCP
+      command: >
+        scp -r -i /home/molka/.ssh/id_rsa
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        /opt/hadoop-3.3.1.tar.gz 
+        molka@{{ inventory_hostname }}:/tmp/
+      delegate_to: localhost
+
+    - name: Déplacer l'archive
+      become: yes
+      shell: |
+        mv /tmp/hadoop-3.3.1.tar.gz /opt/
+        chown molka:molka /opt/hadoop-3.3.1.tar.gz
+
+    - name: Créer le répertoire Hadoop
+      file:
+        path: /opt/hadoop
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+
+    - name: S'assurer que .bashrc appartient à molka
+      file:
+        path: /home/molka/.bashrc
+        owner: molka
+        group: molka
+        mode: '644'
+      ignore_errors: yes  # Ignore si le fichier n'existe pas encore
+
+    - name: Extraire Hadoop sur chaque nœud
+      become: yes
+      shell: |
+        tar xzf /opt/hadoop-3.3.1.tar.gz -C /opt/hadoop --strip-components=1 || (echo "Échec extraction" && exit 1)
+        chown -R molka:molka /opt/hadoop
+        rm -f /opt/hadoop-3.3.1.tar.gz
+      args:
+        executable: /bin/bash
+      register: extraction
+      retries: 3
+      delay: 10
+      until: extraction.rc == 0
+
+    - name: Configurer les variables d'environnement
+      blockinfile:
+        path: /home/molka/.bashrc
+        block: |
+          export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+          export HADOOP_HOME=/opt/hadoop
+          export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin
+        marker: "# {mark} HADOOP CONFIG"
+        owner: molka
+        group: molka
+      notify: Reload bashrc
+
+    - debug:
+        var: hadoop_check.stdout_lines
+
+  handlers:
+    - name: Reload bashrc
+      shell: "bash -lc 'source ~/.bashrc'"
+      args:
+        executable: /bin/bash
+""",
+                'hadoop_config.yml': """---
+- name: Configurer les fichiers de configuration Hadoop et /etc/hosts
+  hosts: all
+  become: yes
+  vars:
+    namenode_hostname: "{{ groups['namenode'][0] }}"
+  tasks:
+    - name: Déployer core-site.xml
+      template:
+        src: templates/core-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/core-site.xml
+    - name: Déployer hdfs-site.xml
+      template:
+        src: templates/hdfs-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/hdfs-site.xml
+    - name: Déployer yarn-site.xml
+      template:
+        src: templates/yarn-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/yarn-site.xml
+    - name: Déployer mapred-site.xml
+      template:
+        src: templates/mapred-site.xml.j2
+        dest: /opt/hadoop/etc/hadoop/mapred-site.xml
+    - name: Déployer le fichier masters
+      template:
+        src: templates/masters.j2
+        dest: /opt/hadoop/etc/hadoop/masters
+    - name: Déployer le fichier workers
+      template:
+        src: templates/workers.j2
+        dest: /opt/hadoop/etc/hadoop/workers
+    - name: Mettre à jour le fichier /etc/hosts avec les hôtes du cluster
+      template:
+        src: templates/hosts.j2
+        dest: /etc/hosts
+""",
+                'hadoop_start.yml': """---
+- name: Configurer SSH sans mot de passe entre nœuds
+  hosts: all
+  become: yes
+  tasks:
+    - name: Installer sshpass
+      apt:
+        name: sshpass
+        state: present
+
+    - name: Générer une clé SSH si inexistante
+      become_user: molka
+      shell: |
+        [ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
+      args:
+        executable: /bin/bash
+
+    - name: Distribuer la clé publique
+      become_user: molka
+      shell:
+            shell: |
+        sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no molka@{{ item }}
+      with_items: "{{ groups['all'] }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['namenode'][0]
+
+- name: Démarrer les services Hadoop
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Mettre à jour hadoop-env.sh pour définir JAVA_HOME
+      shell: |
+        if grep -q '^export JAVA_HOME=' /opt/hadoop/etc/hadoop/hadoop-env.sh; then
+          sed -i 's|^export JAVA_HOME=.*|export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64|' /opt/hadoop/etc/hadoop/hadoop-env.sh;
+        else
+          echo 'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64' >> /opt/hadoop/etc/hadoop/hadoop-env.sh;
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Créer le répertoire /opt/hadoop/logs si nécessaire
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+
+    - name: Formater le NameNode (si nécessaire)
+      become: yes
+      become_user: molka
+      shell: "/opt/hadoop/bin/hdfs namenode -format -force"
+      args:
+        creates: /opt/hadoop/hdfs/name/current/VERSION
+        executable: /bin/bash
+      environment:
+        JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+
+    - name: Démarrer HDFS
+      become: yes
+      become_user: molka
+      shell: |
+        export PDSH_RCMD_TYPE=ssh
+        /opt/hadoop/sbin/start-dfs.sh
+      args:
+        executable: /bin/bash
+      environment:
+        JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+        HADOOP_SSH_OPTS: "-o StrictHostKeyChecking=no"
+        HDFS_NAMENODE_USER: molka
+        HDFS_DATANODE_USER: molka
+        HDFS_SECONDARYNAMENODE_USER: molka
+
+- name: Démarrer le ResourceManager sur le NameNode
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Démarrer le ResourceManager
+      become_user: molka
+      shell: "/opt/hadoop/sbin/yarn-daemon.sh start resourcemanager"
+      args:
+        executable: /bin/bash
+      environment:
+        JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+      register: start_rm
+
+    - name: Vérifier le démarrage des services Hadoop (jps)
+      become: yes
+      become_user: molka
+      shell: "jps"
+      args:
+        executable: /bin/bash
+      register: jps_output
+
+- name: Démarrer les DataNodes manuellement
+  hosts: datanodes
+  become: yes
+  tasks:
+    - name: Démarrer DataNode
+      become_user: molka
+      shell: "/opt/hadoop/bin/hdfs --daemon start datanode"
+      args:
+        executable: /bin/bash
+      environment:
+        JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+
+    - name: Vérifier les DataNodes
+      become_user: molka
+      shell: "jps"
+      register: datanode_jps
+
+    - name: Afficher les processus Hadoop
+      debug:
+        var: datanode_jps.stdout
+"""
+            }
+
+            # Écrire les playbooks
+            for filename, content in playbooks.items():
+                # Échapper les caractères spéciaux pour la commande echo
+                escaped_content = content.replace('"', '\\"').replace('$', '\\$')
+                cmd = f'cat > ~/{filename} <<EOF\n{escaped_content}\nEOF'
+                exit_status, output, error = execute_ssh_command(ssh, cmd)
+                if exit_status != 0:
+                    print(f"Erreur création {filename}: {error}")
+                    return False
+
+            # Exécuter les playbooks Ansible
+            for filename in playbooks.keys():
+                cmd = f'ansible-playbook -i ~/inventory.ini ~/{filename}'
+                exit_status, output, error = execute_ssh_command(ssh, cmd)
+                if exit_status != 0:
+                    print(f"Erreur exécution {filename}: {error}")
+                    return False
+
+            return jsonify({
+                "status": "success",
+                "vms": results,
+                "ip_map": ip_map,
+                "errors": errors
+            })
+
+        except Exception as e:
+            log_step(f"ERREUR FATALE: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "error": str(e),
+                "cluster_name": data.get('cluster_name', 'unknown')
+            }), 500
+
+#####################################################################################################
+#####################################################################################################
+#####################################################################################################
+#####################################################################################################
+#####################################################################################################
+# Fonctions utilitaires (à adapter selon votre implémentation)
+def create_vmprox_direct(data):
+    with app.test_request_context('/create_vmprox', method='POST', json=data):
+        return create_vmprox()
+
+def start_vmprox_direct(data):
+    with app.test_request_context('/start_vmprox', method='POST', json=data):
+        return start_vmprox()
+
+def get_vmip_direct(data):
+    """Nouvelle version simplifiée"""
+    with app.test_request_context('/get_vmip', method='POST', json=data):
+        response = get_vmip()
+        return response.get_json(), response.status_code
+
+#####################################################################################################
+##################################################################################################
+import logging
+from datetime import datetime
+from flask import jsonify, request
+import paramiko
+
+# Configuration du logging
+logging.basicConfig(filename='hadoop_deploy.log', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def log_step(message):
+    logger.info(f"[{datetime.now()}] {message}")
+    print(message)
+
+def execute_ssh_command(ssh, command):
+    """Exécute une commande SSH et retourne le résultat"""
+    stdin, stdout, stderr = ssh.exec_command(command)
+    exit_status = stdout.channel.recv_exit_status()
+    output = stdout.read().decode().strip()
+    error = stderr.read().decode().strip()
+    return exit_status, output, error
+
+def create_ssh_client(host):
+    """Crée une connexion SSH"""
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(
+            host, 
+            username="molka", 
+            password="molka",
+            look_for_keys=False,
+            allow_agent=False,
+            timeout=30
+        )
+        return ssh
+    except Exception as e:
+        print(f"Échec de connexion SSH à {host}: {str(e)}")
+        return None
+
+@app.route('/clusterha_vmprox', methods=['POST'])
+def clusterha_vmprox():
+    data = request.get_json()
+    print(f"Starting HA cluster creation: {data['cluster_name']}")
+    
+    # Validation des données
+    required = ['proxmox_ip', 'password', 'target_node', 'vm_id_start',
+                'template', 'cluster_name', 'node_count']
+    if not all(field in data for field in required):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    vm_id = int(data['vm_id_start'])
+    results = []
+    ip_map = {}
+    errors = []
+
+    # 1ère BOUCLE: Création de toutes les machines
+    print("=== PHASE 1: Création des VMs ===")
+    vm_ids = []
+    for i in range(data['node_count'] + 2):  # +2 pour l'ansible et le standby
+        if i == data['node_count']:
+            vm_type = "ansible"  # Ansible Controller
+        elif i == data['node_count'] + 1:
+            vm_type = "standby"  # Standby Node
         else:
-            return jsonify({"success": False, "message": f"Erreur lors de la migration : {error}"}), 500
+            vm_type = "namenode" if i == 0 else "datanode"  # NameNode ou DataNode
+        
+        hostname = f"{data['cluster_name']}-{vm_type}-{i}" if vm_type != "ansible" else f"ansible-{data['cluster_name']}"
+        current_vm_id = str(vm_id + i)
+        vm_ids.append(current_vm_id)
+        
+        try:
+            create_data = {
+                "proxmoxIp": data['proxmox_ip'],
+                "password": data['password'],
+                "hostname": hostname,
+                "targetNode": data['target_node'],
+                "vm_id": current_vm_id,
+                "template": data['template'],
+                "network": data.get('network_type', 'nat'),
+                "vm_type": vm_type
+            }
+            
+            create_response = create_vmprox_direct(create_data)
+            
+            if create_response[1] != 200:
+                error_msg = create_response[0].get_json().get('error', '')
+                if "plugin crashed" in error_msg:
+                    print(f"[VM {current_vm_id}] Warning: Terraform plugin crashed but continuing")
+                    results.append({
+                        "vm_id": current_vm_id,
+                        "type": vm_type,
+                        "status": "created_with_warning",
+                        "warning": "Terraform plugin crashed"
+                    })
+                else:
+                    raise Exception(f"Creation failed: {error_msg}")
+            else:
+                print(f"[VM {current_vm_id}] Successfully created")
+                results.append({
+                    "vm_id": current_vm_id,
+                    "type": vm_type,
+                    "status": "created"
+                })
+
+        except Exception as e:
+            error_msg = f"[VM {current_vm_id}] Creation error: {str(e)}"
+            print(error_msg)
+            errors.append(error_msg)
+            results.append({
+                "vm_id": current_vm_id,
+                "type": vm_type,
+                "status": "failed",
+                "error": str(e)
+            })
+
+    # 2ème BOUCLE: Démarrage des machines et attente
+    print("\n=== PHASE 2: Démarrage des VMs ===")
+    for vm in results:
+        if vm['status'] not in ['created', 'created_with_warning']:
+            continue
+            
+        current_vm_id = vm['vm_id']
+        try:
+            print(f"[VM {current_vm_id}] Starting...")
+            start_response = start_vmprox_direct({
+                "proxmox_ip": data['proxmox_ip'],
+                "username": "root",
+                "password": data['password'],
+                "vm_id": current_vm_id
+            })
+            
+            if start_response[1] != 200:
+                raise Exception(f"Start failed: {start_response[0].get_json()}")
+            
+            print(f"[VM {current_vm_id}] Waiting 90 seconds...")
+            time.sleep(90)  # Attente fixe pour toutes les VMs
+            vm['status'] = "started"
+
+        except Exception as e:
+            error_msg = f"[VM {current_vm_id}] Start error: {str(e)}"
+            print(error_msg)
+            errors.append(error_msg)
+            vm['status'] = "start_failed"
+            vm['error'] = str(e)
+
+    # 3ème BOUCLE: Récupération des IPs
+    ansible_ip = None
+    namenode_ip = None
+    standby_ip = None
+    datanode_ips = []
+    retry_attempts = 10  # Nombre de tentatives
+    retry_delay = 30    # Délai d'attente entre les tentatives en secondes
+
+    for vm in results:
+        if vm['status'] != 'started':
+            continue
+            
+        current_vm_id = vm['vm_id']
+        vm_type = vm['type']
+        
+        for attempt in range(retry_attempts):
+            try:
+                print(f"[VM {current_vm_id}] Tentative {attempt + 1}/{retry_attempts} pour obtenir l'IP... (Type: {vm_type})")
+                ip_data, status_code = get_vmip_direct({
+                    "proxmoxIp": data['proxmox_ip'],
+                    "password": data['password'],
+                    "vm_id": current_vm_id
+                })
+                
+                if status_code != 200:
+                    raise Exception(f"Erreur: {ip_data.get('error', 'Inconnue')}")
+                
+                vm_ip = ip_data['ip'] if isinstance(ip_data, dict) else ip_data
+                vm_ip = vm_ip.strip().replace("inet ", "")
+                vm['ip'] = vm_ip
+                
+                # Log spécifique pour le nœud Ansible
+                if vm_type == "ansible":
+                    ansible_ip = vm_ip
+                    print(f"!!! NŒUD ANSIBLE TROUVÉ !!! IP: {ansible_ip} (VM ID: {current_vm_id})")
+                elif vm_type == "namenode":
+                    namenode_ip = vm_ip
+                elif vm_type == "standby":
+                    standby_ip = vm_ip
+                elif vm_type == "datanode":
+                    datanode_ips.append(vm_ip)
+
+                if vm_type not in ip_map:
+                    ip_map[vm_type] = []
+                ip_map[vm_type].append(vm_ip)
+                
+                print(f"[VM {current_vm_id}] IP attribuée: {vm_ip}")
+                break  # Sortir de la boucle si l'IP a été récupérée avec succès
+
+            except Exception as e:
+                error_msg = f"[VM {current_vm_id}] Erreur IP: {str(e)}"
+                print(error_msg)
+                errors.append(error_msg)
+                vm['status'] = "ip_failed"
+                vm['error'] = str(e)
+
+                if attempt < retry_attempts - 1:
+                    print(f"Aucune IP obtenue, attente de {retry_delay} secondes avant de réessayer...")
+                    time.sleep(retry_delay)  # Attendre avant de réessayer
+
+    # Vérification finale des IPs
+    if not ansible_ip:
+        raise Exception("ERREUR CRITIQUE: Aucune IP trouvée pour le nœud Ansible")
+
+    print(f"""
+    === VÉRIFICATION IP ===
+    IP Ansible: {ansible_ip}
+    IP NameNode: {namenode_ip}
+    IP Standby: {standby_ip}
+    IP DataNodes: {', '.join(datanode_ips)}
+    """)
+
+    # Vérification des IPs récupérées
+    if not ansible_ip or not namenode_ip or not standby_ip or len(datanode_ips) < 2:
+        raise Exception("ERREUR CRITIQUE: Aucune IP trouvée pour le nœud Ansible ou NameNode/Datanodes manquants.")
+
+    # 4ème PHASE: Configuration Ansible et installation Hadoop
+    try:
+        # Créer une connexion SSH vers le contrôleur Ansible
+        ssh = create_ssh_client(ansible_ip)
+        if not ssh:
+            print("Échec de la connexion SSH.")
+            return False
+
+        # Télécharger Hadoop et configurer
+        commands = [
+            'sudo apt update && sudo apt install -y wget openjdk-11-jdk net-tools sshpass pdsh',
+            'sudo apt install -y python3 python3-pip',
+            'sudo apt install -y ansible',
+
+            #########################################jareb
+            'mkdir -p ~/.ssh',
+            '[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa',
+            f'ssh-keyscan -H {ansible_ip} >> ~/.ssh/known_hosts',
+            f'ssh-keyscan -H {namenode_ip} >> ~/.ssh/known_hosts',
+            f'ssh-keyscan -H {standby_ip} >> ~/.ssh/known_hosts',
+            f'ssh-keyscan -H {datanode_ips } >> ~/.ssh/known_hosts',
+        ]
+        # Ajout des commandes pour copier la clé SSH sur chaque datanode
+        for ip in datanode_ips:
+            commands.append(f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{ip}')
+
+        # Ajout des commandes pour copier la clé SSH sur d'autres hôtes
+        commands.extend([
+            f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{ansible_ip}',
+            f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{namenode_ip}',
+            f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{standby_ip}',
+
+            'chmod 600 ~/.ssh/id_rsa',
+            'chmod 644 ~/.ssh/id_rsa.pub',
+            'chmod 700 ~/.ssh',
+################################################################################################################################
+#ZOOKEEPER
+#################################################################################################################################
+           'wget https://archive.apache.org/dist/zookeeper/zookeeper-3.6.3/apache-zookeeper-3.6.3-bin.tar.gz',
+           'sudo mv apache-zookeeper-3.6.3-bin.tar.gz /tmp',
+
+           # Copier vers Namenode et Standby
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/apache-zookeeper-3.6.3-bin.tar.gz molka@{namenode_ip}:/tmp/',
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/apache-zookeeper-3.6.3-bin.tar.gz molka@{standby_ip}:/tmp/',
+            # Copier vers seulement le premier datanode (pour avoir 3 nœuds ZooKeeper)
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /tmp/apache-zookeeper-3.6.3-bin.tar.gz molka@{datanode_ips[0]}:/tmp/',
+
+            # Créer /etc/zookeeper et déplacer le fichier
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /etc/zookeeper && sudo mv /tmp/apache-zookeeper-3.6.3-bin.tar.gz /etc/zookeeper/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /etc/zookeeper && sudo mv /tmp/apache-zookeeper-3.6.3-bin.tar.gz /etc/zookeeper/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /etc/zookeeper && sudo mv /tmp/apache-zookeeper-3.6.3-bin.tar.gz /etc/zookeeper/"',
+
+            # Extraire Zookeeper
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "cd /etc/zookeeper && sudo tar xzf apache-zookeeper-3.6.3-bin.tar.gz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "cd /etc/zookeeper && sudo tar xzf apache-zookeeper-3.6.3-bin.tar.gz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "cd /etc/zookeeper && sudo tar xzf apache-zookeeper-3.6.3-bin.tar.gz --strip-components=1"',
+
+            # Renommer zoo_sample.cfg en zoo.cfg
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mv /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mv /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mv /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg"',
+
+            # Créer d'abord le dossier puis écrire l'ID
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /var/lib/zookeeper && echo 1 | sudo tee /var/lib/zookeeper/myid"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /var/lib/zookeeper && echo 2 | sudo tee /var/lib/zookeeper/myid"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /var/lib/zookeeper && echo 3 | sudo tee /var/lib/zookeeper/myid"',
+
+            # 📂 Ajouter la création des dossiers logs avec bonne permission
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /etc/zookeeper/logs /var/lib/zookeeper /var/log/zookeeper && sudo chown -R molka:molka /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && sudo chmod -R 755 /etc/zookeeper"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /etc/zookeeper/logs /var/lib/zookeeper /var/log/zookeeper && sudo chown -R molka:molka /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && sudo chmod -R 755 /etc/zookeeper"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /etc/zookeeper/logs /var/lib/zookeeper /var/log/zookeeper && sudo chown -R molka:molka /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && sudo chmod -R 755 /etc/zookeeper"',
+        
+################################################################################################################################
+#HADOOP
+#################################################################################################################################
+            'wget https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz',
+            'sudo mv hadoop-3.3.1.tar.gz /tmp',
+            'sudo chown -R molka:molka /opt',
+            # Copier vers Namenode et Standby
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/hadoop-3.3.1.tar.gz molka@{namenode_ip}:/tmp/',
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/hadoop-3.3.1.tar.gz molka@{standby_ip}:/tmp/',
+            f'for datanode in {" ".join(datanode_ips)}; do sshpass -p "molka" scp -o StrictHostKeyChecking=no /tmp/hadoop-3.3.1.tar.gz molka@${{datanode}}:/tmp/; done',
+
+            # Créer /opt/hadoop et déplacer le fichier
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /opt/hadoop && sudo mv /tmp/hadoop-3.3.1.tar.gz /opt/hadoop/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /opt/hadoop && sudo mv /tmp/hadoop-3.3.1.tar.gz /opt/hadoop/"',
+            f'for datanode in {" ".join(datanode_ips)}; do ssh -o StrictHostKeyChecking=no molka@${{datanode}} "sudo mkdir -p /opt/hadoop && sudo mv /tmp/hadoop-3.3.1.tar.gz /opt/hadoop/"; done',
+
+            # Extraire hadoop
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "cd /opt/hadoop && sudo tar xzf hadoop-3.3.1.tar.gz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "cd /opt/hadoop && sudo tar xzf hadoop-3.3.1.tar.gz --strip-components=1"',
+            f'for datanode in {" ".join(datanode_ips)}; do ssh -o StrictHostKeyChecking=no molka@${{datanode}} "cd /opt/hadoop && sudo tar xzf hadoop-3.3.1.tar.gz --strip-components=1"; done',
+
+
+
+################################################################################################################################
+#BASHRC
+#################################################################################################################################
+            # modification ."bashrc
+          ############################################
+            'echo "export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> /home/molka/.bashrc',
+            'echo "export HADOOP_HOME=/opt/hadoop" >> /home/molka/.bashrc',
+            'echo "export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin" >> /home/molka/.bashrc',
+
+            # Copie du .bashrc sur les différents nœuds
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{ansible_ip}:/home/molka/.bashrc',
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{namenode_ip}:/home/molka/.bashrc',
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{standby_ip}:/home/molka/.bashrc',
+            f'for datanode in {" ".join(datanode_ips)}; do sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@${{datanode}}:/home/molka/.bashrc; done',
+             
+              # Recharger le .bashrc pour que les changements prennent effet immédiatement (source)
+            f'ssh -o StrictHostKeyChecking=no molka@{ansible_ip} "source /home/molka/.bashrc"',
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "source /home/molka/.bashrc"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "source /home/molka/.bashrc"',
+            f'for datanode in {" ".join(datanode_ips)}; do ssh -o StrictHostKeyChecking=no molka@${{datanode}} "source /home/molka/.bashrc"; done',
+          
+################################################################################################################################
+#################################################################################################################################
+
+            # 📂 Créer le dossier "templates" pour Ansible
+            'mkdir -p ~/templates',
+            # 📝 Ajouter les fichiers de configuration Hadoop
+            # core-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>fs.defaultFS</name>\n        <value>hdfs://ha-cluster</value>\n    </property>\n    <property>\n        <name>dfs.client.failover.proxy.provider.ha-cluster</name>\n        <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>\n    </property>\n    <property>\n        <name>ha.zookeeper.quorum</name>\n        <value>{% for zk in groups[\'zookeeper\'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>\n    </property>\n    <property>\n        <name>dfs.permissions.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>ipc.client.connect.max.retries</name>\n        <value>3</value>\n    </property>\n</configuration>" > ~/templates/core-site.xml.j2',
+            
+            # hdfs-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>dfs.replication</name>\n        <value>2</value>\n    </property>\n    <property>\n        <name>dfs.nameservices</name>\n        <value>ha-cluster</value>\n    </property>\n    <property>\n        <name>dfs.ha.namenodes.ha-cluster</name>\n        <value>{{ groups[\'namenode\'][0] }},{{ groups[\'standby\'][0] }}</value>\n    </property>\n    <property>\n        <name>dfs.namenode.rpc-address.ha-cluster.{{ groups[\'namenode\'][0] }}</name>\n        <value>{{ hostvars[groups[\'namenode\'][0]].ansible_host }}:8020</value>\n    </property>\n    <property>\n        <name>dfs.namenode.rpc-address.ha-cluster.{{ groups[\'standby\'][0] }}</name>\n        <value>{{ hostvars[groups[\'standby\'][0]].ansible_host }}:8020</value>\n    </property>\n    <property>\n        <name>dfs.namenode.http-address.ha-cluster.{{ groups[\'namenode\'][0] }}</name>\n        <value>{{ hostvars[groups[\'namenode\'][0]].ansible_host }}:50070</value>\n    </property>\n    <property>\n        <name>dfs.namenode.http-address.ha-cluster.{{ groups[\'standby\'][0] }}</name>\n        <value>{{ hostvars[groups[\'standby\'][0]].ansible_host }}:50070</value>\n    </property>\n    <property>\n        <name>dfs.namenode.shared.edits.dir</name>\n        <value>qjournal://{% for jn in groups[\'journalnode\'] %}{{ hostvars[jn].ansible_host }}:8485{% if not loop.last %};{% endif %}{% endfor %}/ha-cluster</value>\n    </property>\n    <property>\n        <name>dfs.ha.automatic-failover.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>dfs.client.failover.proxy.provider.ha-cluster</name>\n        <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>\n    </property>\n    <property>\n        <name>ha.zookeeper.quorum</name>\n        <value>{% for zk in groups[\'zookeeper\'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>\n    </property>\n    <property>\n        <name>dfs.namenode.name.dir</name>\n        <value>file:{{ hadoop_home }}/data/hdfs/namenode</value>\n    </property>\n    <property>\n        <name>dfs.datanode.data.dir</name>\n        <value>file:{{ hadoop_home }}/data/hdfs/datanode</value>\n    </property>\n    <property>\n        <name>dfs.namenode.checkpoint.dir</name>\n        <value>file:{{ hadoop_home }}/data/hdfs/namesecondary</value>\n    </property>\n    <property>\n        <name>dfs.ha.fencing.methods</name>\n        <value>shell(/bin/true)</value>\n    </property>\n    <property>\n        <name>dfs.ha.failover-controller.active-standby-elector.zk.op.retries</name>\n        <value>3</value>\n    </property>\n</configuration>" > ~/templates/hdfs-site.xml.j2',
+            
+            # yarn-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>yarn.resourcemanager.ha.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.cluster-id</name>\n        <value>yarn-cluster</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.ha.rm-ids</name>\n        <value>rm1,rm2</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.zk-address</name>\n        <value>{% for host in groups[\'zookeeper\'] %}{{ host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.hostname.rm1</name>\n        <value>{{ groups[\'resourcemanager\'][0] }}</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.hostname.rm2</name>\n        <value>{{ groups[\'resourcemanager_standby\'][0] }}</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.recovery.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.store.class</name>\n        <value>org.apache.hadoop.yarn.server.resourcemanager.recovery.ZKRMStateStore</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.webapp.address.rm1</name>\n        <value>{{ groups[\'resourcemanager\'][0] }}:8088</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.webapp.address.rm2</name>\n        <value>{{ groups[\'resourcemanager_standby\'][0] }}:8088</value>\n    </property>\n    <property>\n        <name>yarn.nodemanager.resource.memory-mb</name>\n        <value>4096</value>\n    </property>\n    <property>\n        <name>yarn.nodemanager.resource.cpu-vcores</name>\n        <value>4</value>\n    </property>\n</configuration>" > ~/templates/yarn-site.xml.j2',
+            
+            # mapred-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>mapreduce.framework.name</name>\n        <value>yarn</value>\n    </property>\n</configuration>" > ~/templates/mapred-site.xml.j2',
+
+            # masters.j2
+            'echo "{{ groups[\'namenode\'][0] }}" > ~/templates/masters.j2',
+
+            # workers.j2
+            'echo "{% for worker in groups[\'datanodes\'] %}{{ worker }}\n{% endfor %}" > ~/templates/workers.j2',
+
+            # zoo.cfg.j2
+            'echo "tickTime=2000\ninitLimit=10\nsyncLimit=5\ndataDir=/var/lib/zookeeper\ndataLogDir=/var/log/zookeeper\nclientPort=2181\n{% for zk in groups[\'zookeeper\'] %}server.{{ loop.index }}={{ hostvars[zk].ansible_host }}:2888:3888\n{% endfor %}" > ~/templates/zoo.cfg.j2',
+
+            # hosts.j2
+            'echo "# ANSIBLE GENERATED HOSTS FILE\n{% for host in groups[\'all\'] %}{{ hostvars[host].ansible_host }} {{ host }}\n{% endfor %}" > ~/templates/hosts.j2',
+            
+            # Créer le fichier inventory.ini
+            f'echo """[namenode]\n{namenode_ip} ansible_host={namenode_ip}\n{standby_ip} ansible_host={standby_ip}\n\n[standby]\n{standby_ip} ansible_host={standby_ip}\n\n[datanodes]\n{"\n".join([f"{ip} ansible_host={ip}" for ip in datanode_ips])}\n\n[resourcemanager]\n{namenode_ip} ansible_host={namenode_ip}\n\n[resourcemanager_standby]\n{standby_ip} ansible_host={standby_ip}\n\n[zookeeper]\n{namenode_ip} ansible_host={namenode_ip}\n{standby_ip} ansible_host={standby_ip}\n{datanode_ips[0]} ansible_host={datanode_ips[0]}\n\n[journalnode]\n{namenode_ip} ansible_host={namenode_ip}\n{standby_ip} ansible_host={standby_ip}\n{datanode_ips[0]} ansible_host={datanode_ips[0]}\n\n[all:vars]\nansible_user=molka\nansible_ssh_private_key_file=~/.ssh/id_rsa\nansible_ssh_common_args=-o StrictHostKeyChecking=no\nansible_python_interpreter=/usr/bin/python3""" > ~/inventory.ini'        
+            ])
+        
+        for idx, command in enumerate(commands, start=1):
+            print(f"\n[Commande {idx}/{len(commands)}] Exécution : {command}")
+            exit_status, output, error = execute_ssh_command(ssh, command)
+
+            if exit_status == 0:
+                print(f"✅ Commande réussie : {command}")
+            else:
+                print(f"❌ Erreur lors de l'exécution de la commande : {command}")
+                print(f"Code de sortie : {exit_status}")
+                print(f"Message d'erreur :\n{error.strip()}")
+                ssh.close()
+                return False  # Stop dès qu'une commande échoue        
+        # Définir les playbooks avec une syntaxe YAML correcte
+        playbooks = {
+            'deploy_hadoop.yml': """---
+- name: Déploiement Hadoop via extraction
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # 1. Créer /opt si nécessaire
+    - name: Créer répertoire /opt
+      file:
+        path: /opt
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # 2. Installer les dépendances
+    - name: Installer paquets requis
+      apt:
+        name:
+          - openjdk-11-jdk
+          - sshpass
+          - net-tools
+          - pdsh
+          - rsync
+          - tar
+        state: present
+        update_cache: yes
+
+""",
+          'hadoop_config.yml': """---
+- name: Configurer les fichiers de configuration Hadoop et /etc/hosts
+  hosts: all
+  become: yes
+  vars:
+    namenode_hostname: "{{ groups['namenode'][0] }}"
+    standby_hostname: "{{ groups['standby'][0] | default('default_standby_hostname') }}"
+    hadoop_home: /opt/hadoop  # Ajout de la variable hadoop_home
+
+  tasks:
+    - name: Déployer core-site.xml
+      template:
+        src: /home/molka/templates/core-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/core-site.xml"
+
+    - name: Déployer hdfs-site.xml
+      template:
+        src: /home/molka/templates/hdfs-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/hdfs-site.xml"
+
+    - name: Déployer yarn-site.xml
+      template:
+        src: /home/molka/templates/yarn-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/yarn-site.xml"
+
+    - name: Déployer mapred-site.xml
+      template:
+        src: /home/molka/templates/mapred-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/mapred-site.xml"
+
+    - name: Déployer masters
+      template:
+        src: /home/molka/templates/masters.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/masters"
+
+    - name: Déployer workers
+      template:
+        src: /home/molka/templates/workers.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/workers"
+
+    - name: Déployer zoo.cfg pour ZooKeeper
+      template:
+        src: /home/molka/templates/zoo.cfg.j2
+        dest: "/etc/zookeeper/conf/zoo.cfg"
+
+    - name: Mettre à jour /etc/hosts avec les hôtes du cluster
+      template:
+        src: /home/molka/templates/hosts.j2
+        dest: /etc/hosts
+""",
+            'hadoop_start.yml': """---
+- name: Vérifier et démarrer ZooKeeper sur les nœuds ZooKeeper
+  hosts: zookeeper
+  become: yes
+  vars:
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+    hadoop_home: "/opt/hadoop"
+    zookeeper_home: "/etc/zookeeper"
+  tasks:
+    - name: Vérifier la configuration de ZooKeeper
+      stat:
+        path: "{{ zookeeper_home }}/conf/zoo.cfg"
+      register: zoo_cfg_exists
+
+    - name: Afficher le contenu de zoo.cfg
+      shell: "cat {{ zookeeper_home }}/conf/zoo.cfg"
+      register: zoo_cfg_content
+      when: zoo_cfg_exists.stat.exists
+      
+    - name: Afficher le contenu de zoo.cfg
+      debug:
+        var: zoo_cfg_content.stdout_lines
+      when: zoo_cfg_exists.stat.exists
+    
+    - name: Créer le répertoire /var/lib/zookeeper s'il n'existe pas
+      file:
+        path: /var/lib/zookeeper
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+
+    - name: Déplacer le fichier myid vers /var/lib/zookeeper
+      command: mv /etc/zookeeper/myid /var/lib/zookeeper/myid
+      args:
+        removes: /etc/zookeeper/myid
+      become_user: molka
+      ignore_errors: yes
+
+    - name: Stopper ZooKeeper si déjà en cours d'exécution
+      shell: "{{ zookeeper_home }}/bin/zkServer.sh stop"
+      become_user: molka
+      environment:
+        ZOO_LOG_DIR: "/var/log/zookeeper"
+        ZOO_CONF_DIR: "{{ zookeeper_home }}/conf"
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+      
+    - name: Attendre que ZooKeeper s'arrête
+      pause:
+        seconds: 5
+    
+    - name: Démarrer ZooKeeper
+      shell: "{{ zookeeper_home }}/bin/zkServer.sh start"
+      become_user: molka
+      environment:
+        ZOO_LOG_DIR: "/var/log/zookeeper"
+        ZOO_CONF_DIR: "{{ zookeeper_home }}/conf"
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      register: zk_status
+      
+    - name: Attendre le démarrage de ZooKeeper
+      pause:
+        seconds: 10
+        
+    - name: Vérifier le démarrage de ZooKeeper
+      shell: "{{ zookeeper_home }}/bin/zkServer.sh status"
+      become_user: molka
+      environment:
+        ZOO_LOG_DIR: "/var/log/zookeeper"
+        ZOO_CONF_DIR: "{{ zookeeper_home }}/conf"
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      register: zk_status_check
+      ignore_errors: yes
+      
+    - name: Afficher le statut de ZooKeeper
+      debug:
+        var: zk_status_check.stdout
+        
+    - name: Afficher les journaux ZooKeeper
+      shell: "tail -n 30 /var/log/zookeeper/zookeeper.log"
+      become_user: molka
+      register: zk_logs
+      ignore_errors: yes
+      
+    - name: Afficher les journaux de ZooKeeper
+      debug:
+        var: zk_logs.stdout_lines
+    
+    - name: Créer les répertoires de logs
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: molka
+        group: molka
+        mode: 0755
+    
+    - name: Configurer hadoop-env.sh
+      lineinfile:
+        path: /opt/hadoop/etc/hadoop/hadoop-env.sh
+        line: "export JAVA_HOME={{ java_home }}"
+        state: present  
+                                            
+- name: Configuration des JournalNodes
+  hosts: zookeeper
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Créer le répertoire JournalNode
+      file:
+        path: /opt/hadoop/data/hdfs/journalnode
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+
+    - name: Démarrer JournalNode en arrière-plan
+      shell: "nohup {{ hadoop_home }}/bin/hdfs --daemon start journalnode > /tmp/journalnode.log 2>&1 &"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+        HADOOP_LOG_DIR: "/opt/hadoop/logs"
+      args:
+        executable: /bin/bash
+
+    - name: Attendre le démarrage du JournalNode
+      pause:
+        seconds: 10
+
+    - name: Vérifier que le JournalNode est actif
+      wait_for:
+        port: 8485
+        timeout: 60
+        
+    - name: Vérifier les journaux du JournalNode
+      shell: "tail -n 30 {{ hadoop_home }}/logs/hadoop-molka-journalnode-*.log"
+      become_user: molka
+      register: jn_logs
+      ignore_errors: yes
+      
+    - name: Afficher les journaux du JournalNode
+      debug:
+        var: jn_logs.stdout_lines
+
+- name: Nettoyer et démarrer les services sur le NameNode actif
+  hosts: namenode
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Nettoyer les processus existants
+      shell: "ps -ef | grep -i hadoop | grep -v grep | awk '{print $2}' | xargs -r kill"
+      become_user: molka
+      ignore_errors: yes
+      
+    - name: Attendre que tous les processus s'arrêtent
+      pause:
+        seconds: 5
+
+    - name: Initialiser HA dans ZooKeeper
+      shell: "{{ hadoop_home }}/bin/hdfs zkfc -formatZK -force -nonInteractive"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['namenode'][0]
+      register: zkfc_result
+      failed_when: false
+      
+    - name: Afficher le résultat de formatZK
+      debug:
+        var: zkfc_result
+      when: inventory_hostname == groups['namenode'][0]
+                                                          
+    - name: Créer le répertoire namenode
+      file:
+        path: "{{ hadoop_home }}/data/hdfs/namenode"
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+                                                                                                                               
+    - name: Formater le NameNode (si nécessaire)
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"
+      args:
+        creates: "{{ hadoop_home }}/data/hdfs/namenode/current/VERSION"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      when: inventory_hostname == groups['namenode'][0]
+      
+    - name: Démarrer le NameNode explicitement
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start namenode"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+        
+    - name: Démarrer ZKFC explicitement
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start zkfc"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+        
+    - name: Attendre que le NameNode commence à écouter
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 8020
+        timeout: 60
+                                            
+    - name: Démarrer les autres services HDFS
+      shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+- name: Vérifier la connectivité entre nœuds
+  hosts: standby
+  become: yes
+  tasks:
+    - name: Vérifier la connectivité avec le NameNode actif
+      shell: "ping -c 4 {{ groups['namenode'][0] }}"
+      register: ping_result
+      ignore_errors: yes
+      
+    - name: Afficher le résultat du ping
+      debug:
+        var: ping_result.stdout_lines
+        
+    - name: Vérifier le port 8020 sur le NameNode actif
+      shell: "nc -zv {{ groups['namenode'][0] }} 8020"
+      register: nc_result
+      ignore_errors: yes
+      
+    - name: Afficher le résultat de la vérification de port
+      debug:
+        var: nc_result
+
+- name: Configurer le NameNode standby
+  hosts: standby
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Créer le répertoire standby namenode
+      file:
+        path: "{{ hadoop_home }}/data/hdfs/namenode"
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+        
+    - name: Bootstrap du standby avec timeout augmenté
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -bootstrapStandby -force"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+        HADOOP_CLIENT_OPTS: "-Dfs.defaultFS=hdfs://{{ groups['namenode'][0] }}:8020 -Ddfs.namenode.rpc-address.nn1={{ groups['namenode'][0] }}:8020"
+      register: bootstrap_result
+      failed_when: false
+      
+    - name: Afficher le résultat du bootstrap
+      debug:
+        var: bootstrap_result
+        
+    - name: Démarrer le standby NameNode
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start namenode"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+      
+    - name: Démarrer ZKFC sur le standby
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start zkfc"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+- name: Démarrer YARN sur les ResourceManagers
+  hosts: resourcemanager
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Démarrer Ressource Manager Active
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start resourcemanager"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['resourcemanager'][0]
+      ignore_errors: yes
+
+    - name: Attendre le démarrage du ResourceManager actif
+      pause:
+        seconds: 10
+      when: inventory_hostname == groups['resourcemanager'][0]                                                                                        
+                                            
+    - name: Démarrer YARN
+      shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes                                      
+                                                  
+    - name: Démarrer explicitement le ResourceManager en arrière-plan
+      shell: "nohup {{ hadoop_home }}/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes                                      
+
+    - name: Pause pour démarrage du ResourceManager
+      pause:
+        seconds: 20 
+
+- name: Restart ResourceManagers Standby
+  hosts: resourcemanager_standby
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Stopper Ressource Manager standby
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh stop resourcemanager"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+      ignore_errors: yes
+
+    - name: Attendre l'arrêt du ResourceManager standby
+      pause:
+        seconds: 10
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+      
+    - name: Démarrer Ressource Manager Standby
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start resourcemanager"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+      ignore_errors: yes
+
+- name: Re-Démarrer YARN sur tous les nœuds
+  hosts: resourcemanager
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:                                            
+    - name: Démarrer YARN
+      shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes  
+                                                                                        
+- name: Vérifier les services Hadoop (jps)
+  hosts: all
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+  tasks:
+    - name: Vérifier les processus avec jps
+      shell: "jps"
+      register: jps_output
+      become_user: molka
+      args:
+        executable: /bin/bash
+
+    - name: Afficher la sortie de jps
+      debug:
+        var: jps_output.stdout
+"""
+        }  
+        # Écriture des playbooks dans des fichiers dans le répertoire home
+        for filename, content in playbooks.items():
+            remote_path = f"~/{filename}"  # Chemin vers le home de l'utilisateur
+            command = f'echo "{content.replace("\"", "\\\"")}" > {remote_path}'  # Échapper les guillemets
+
+            print(f"Exécution de la commande pour écrire le playbook : {filename}")
+            exit_status, output, error = execute_ssh_command(ssh, command)
+
+            if exit_status == 0:
+                print(f"✅ Playbook écrit avec succès : {filename}")
+            else:
+                print(f"❌ Erreur lors de l'écriture du playbook : {filename}")
+                print(f"Code de sortie : {exit_status}")
+                print(f"Message d'erreur :\n{error.strip()}")
+                ssh.close()
+                return False  # Stop dès qu'une commande échoue
+
+        # Exécution des playbooks un par un
+        for filename in playbooks.keys():
+            print(f"Exécution du playbook : {filename}")
+            command = f'ansible-playbook ~/{filename} -i ~/inventory.ini -vvv'  # Assurez-vous que l'inventaire est correctement défini
+
+            exit_status, output, error = execute_ssh_command(ssh, command)
+
+            if exit_status == 0:
+                print(f"✅ Exécution réussie du playbook : {filename}")
+            else:
+                print(f"❌ Erreur lors de l'exécution du playbook : {filename}")
+                print(f"Code de sortie : {exit_status}")
+                print(f"Message d'erreur :\n{error.strip()}")
+         # 2. Commandes post-installation structurées
+        post_playbooks_commands = [
+            # Cluster HDFS
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"', "Formatage Namenode"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"', "Formatage Standby"),
+
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/hdfs --daemon start namenode"', "Démarrage Namenode principal"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/hdfs --daemon start namenode"', "Démarrage Namenode secondaire"),
+            
+            # DataNodes
+            *[(f'ssh -o StrictHostKeyChecking=no molka@{ip} "/opt/hadoop/bin/hdfs --daemon start datanode"', f"Démarrage Datanode {ip}") for ip in datanode_ips],
+            *[(f'ssh -o StrictHostKeyChecking=no molka@{ip} "/opt/hadoop/bin/hdfs --daemon start journalnode"', f"Démarrage Journalnode {ip}") for ip in datanode_ips],
+            
+            # ZooKeeper Cluster
+            # Démarrage explicite de ZooKeeper sur Namenode, Standby et Datanode1
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/etc/zookeeper/bin/zkServer.sh start"', f"Démarrage ZooKeeper {namenode_ip}"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/etc/zookeeper/bin/zkServer.sh start"', f"Démarrage ZooKeeper {standby_ip}"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "/etc/zookeeper/bin/zkServer.sh start"', f"Démarrage ZooKeeper {datanode_ips[0]}"),
+                          
+            # Mécanismes HA
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/hdfs --daemon start zkfc"', "Démarrage ZKFC principal"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/hdfs --daemon start zkfc"', "Démarrage ZKFC secondaire"),
+            
+            # Services YARN
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/yarn --daemon start resourcemanager"', "Démarrage ResourceManager principal"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/yarn --daemon start resourcemanager"', "Démarrage ResourceManager secondaire"),
+            *[(f'ssh -o StrictHostKeyChecking=no molka@{ip} "/opt/hadoop/bin/yarn --daemon start nodemanager"', f"Démarrage NodeManager {ip}") for ip in datanode_ips],
+        ]
+        # 3. Exécution séquentielle avec vérification
+        print("\n🚀 Phase de démarrage des services...")
+        for cmd, service_name in post_playbooks_commands:
+            exit_code, output, error = execute_ssh_command(ssh, cmd)
+            
+            if exit_code != 0:
+                print(f"⛔ Échec sur {service_name}")
+                ssh.close()
+                return jsonify({
+                    "status": "error",
+                    "error": f"{service_name} : {error.strip()}", 
+                    "commande": cmd
+                }), 500
+            print(f"✅ {service_name} opérationnel")
+        # Fermez la connexion SSH après l'exécution
+        ssh.close()
+        # Toujours succès à la fin
+        return jsonify({
+            "status": "success",
+            "vms": results,
+            "ip_map": ip_map,
+            "errors": {}
+        })
 
     except Exception as e:
-        return jsonify({"success": False, "message": f"Erreur lors de la migration : {str(e)}"}), 500
-        #####################################################################################################
-        #####################################################################################################
-                ####################################################################################################
+        log_step(f"ERREUR FATALE: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "cluster_name": data.get('cluster_name', 'unknown')
+        }), 500
+
+# Fonctions utilitaires (à adapter selon votre implémentation)
+def create_vmprox_direct(data):
+    with app.test_request_context('/create_vmprox', method='POST', json=data):
+        return create_vmprox()
+
+def start_vmprox_direct(data):
+    with app.test_request_context('/start_vmprox', method='POST', json=data):
+        return start_vmprox()
+
+def get_vmip_direct(data):
+    """Nouvelle version simplifiée"""
+    with app.test_request_context('/get_vmip', method='POST', json=data):
+        response = get_vmip()
+        return response.get_json(), response.status_code
+#########################################################################################################################"
+########################################################################################################################
+###########################################################################################################################"
+@app.route('/clusterspark_vmprox', methods=['POST'])
+def clusterspark_vmprox():
+    data = request.get_json()
+    print(f"Starting HA cluster creation: {data['cluster_name']}")
+    
+    # Validation des données
+    required = ['proxmox_ip', 'password', 'target_node', 'vm_id_start',
+                'template', 'cluster_name', 'node_count']
+    if not all(field in data for field in required):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    vm_id = int(data['vm_id_start'])
+    results = []
+    ip_map = {}
+    errors = []
+
+    # 1ère BOUCLE: Création de toutes les machines
+    print("=== PHASE 1: Création des VMs ===")
+    vm_ids = []
+    for i in range(data['node_count'] + 2):  # +2 pour l'ansible et le standby
+        if i == data['node_count']:
+            vm_type = "ansible"  # Ansible Controller
+        elif i == data['node_count'] + 1:
+            vm_type = "standby"  # Standby Node
+        else:
+            vm_type = "namenode" if i == 0 else "datanode"  # NameNode ou DataNode
+        
+        hostname = f"{data['cluster_name']}-{vm_type}-{i}" if vm_type != "ansible" else f"ansible-{data['cluster_name']}"
+        current_vm_id = str(vm_id + i)
+        vm_ids.append(current_vm_id)
+        
+        try:
+            create_data = {
+                "proxmoxIp": data['proxmox_ip'],
+                "password": data['password'],
+                "hostname": hostname,
+                "targetNode": data['target_node'],
+                "vm_id": current_vm_id,
+                "template": data['template'],
+                "network": data.get('network_type', 'nat'),
+                "vm_type": vm_type
+            }
+            
+            create_response = create_vmprox_direct(create_data)
+            
+            if create_response[1] != 200:
+                error_msg = create_response[0].get_json().get('error', '')
+                if "plugin crashed" in error_msg:
+                    print(f"[VM {current_vm_id}] Warning: Terraform plugin crashed but continuing")
+                    results.append({
+                        "vm_id": current_vm_id,
+                        "type": vm_type,
+                        "status": "created_with_warning",
+                        "warning": "Terraform plugin crashed"
+                    })
+                else:
+                    raise Exception(f"Creation failed: {error_msg}")
+            else:
+                print(f"[VM {current_vm_id}] Successfully created")
+                results.append({
+                    "vm_id": current_vm_id,
+                    "type": vm_type,
+                    "status": "created"
+                })
+
+        except Exception as e:
+            error_msg = f"[VM {current_vm_id}] Creation error: {str(e)}"
+            print(error_msg)
+            errors.append(error_msg)
+            results.append({
+                "vm_id": current_vm_id,
+                "type": vm_type,
+                "status": "failed",
+                "error": str(e)
+            })
+
+    # 2ème BOUCLE: Démarrage des machines et attente
+    print("\n=== PHASE 2: Démarrage des VMs ===")
+    for vm in results:
+        if vm['status'] not in ['created', 'created_with_warning']:
+            continue
+            
+        current_vm_id = vm['vm_id']
+        try:
+            print(f"[VM {current_vm_id}] Starting...")
+            start_response = start_vmprox_direct({
+                "proxmox_ip": data['proxmox_ip'],
+                "username": "root",
+                "password": data['password'],
+                "vm_id": current_vm_id
+            })
+            
+            if start_response[1] != 200:
+                raise Exception(f"Start failed: {start_response[0].get_json()}")
+            
+            print(f"[VM {current_vm_id}] Waiting 90 seconds...")
+            time.sleep(90)  # Attente fixe pour toutes les VMs
+            vm['status'] = "started"
+
+        except Exception as e:
+            error_msg = f"[VM {current_vm_id}] Start error: {str(e)}"
+            print(error_msg)
+            errors.append(error_msg)
+            vm['status'] = "start_failed"
+            vm['error'] = str(e)
+
+    # 3ème BOUCLE: Récupération des IPs
+    ansible_ip = None
+    namenode_ip = None
+    standby_ip = None
+    datanode_ips = []
+    retry_attempts = 10  # Nombre de tentatives
+    retry_delay = 30    # Délai d'attente entre les tentatives en secondes
+
+    for vm in results:
+        if vm['status'] != 'started':
+            continue
+            
+        current_vm_id = vm['vm_id']
+        vm_type = vm['type']
+        
+        for attempt in range(retry_attempts):
+            try:
+                print(f"[VM {current_vm_id}] Tentative {attempt + 1}/{retry_attempts} pour obtenir l'IP... (Type: {vm_type})")
+                ip_data, status_code = get_vmip_direct({
+                    "proxmoxIp": data['proxmox_ip'],
+                    "password": data['password'],
+                    "vm_id": current_vm_id
+                })
+                
+                if status_code != 200:
+                    raise Exception(f"Erreur: {ip_data.get('error', 'Inconnue')}")
+                
+                vm_ip = ip_data['ip'] if isinstance(ip_data, dict) else ip_data
+                vm_ip = vm_ip.strip().replace("inet ", "")
+                vm['ip'] = vm_ip
+                
+                # Log spécifique pour le nœud Ansible
+                if vm_type == "ansible":
+                    ansible_ip = vm_ip
+                    print(f"!!! NŒUD ANSIBLE TROUVÉ !!! IP: {ansible_ip} (VM ID: {current_vm_id})")
+                elif vm_type == "namenode":
+                    namenode_ip = vm_ip
+                elif vm_type == "standby":
+                    standby_ip = vm_ip
+                elif vm_type == "datanode":
+                    datanode_ips.append(vm_ip)
+
+                if vm_type not in ip_map:
+                    ip_map[vm_type] = []
+                ip_map[vm_type].append(vm_ip)
+                
+                print(f"[VM {current_vm_id}] IP attribuée: {vm_ip}")
+                break  # Sortir de la boucle si l'IP a été récupérée avec succès
+
+            except Exception as e:
+                error_msg = f"[VM {current_vm_id}] Erreur IP: {str(e)}"
+                print(error_msg)
+                errors.append(error_msg)
+                vm['status'] = "ip_failed"
+                vm['error'] = str(e)
+
+                if attempt < retry_attempts - 1:
+                    print(f"Aucune IP obtenue, attente de {retry_delay} secondes avant de réessayer...")
+                    time.sleep(retry_delay)  # Attendre avant de réessayer
+
+    # Vérification finale des IPs
+    if not ansible_ip:
+        raise Exception("ERREUR CRITIQUE: Aucune IP trouvée pour le nœud Ansible")
+
+    print(f"""
+    === VÉRIFICATION IP ===
+    IP Ansible: {ansible_ip}
+    IP NameNode: {namenode_ip}
+    IP Standby: {standby_ip}
+    IP DataNodes: {', '.join(datanode_ips)}
+    """)
+
+    # Vérification des IPs récupérées
+    if not ansible_ip or not namenode_ip or not standby_ip or len(datanode_ips) < 2:
+        raise Exception("ERREUR CRITIQUE: Aucune IP trouvée pour le nœud Ansible ou NameNode/Datanodes manquants.")
+
+    # 4ème PHASE: Configuration Ansible et installation Hadoop
+    try:
+        # Créer une connexion SSH vers le contrôleur Ansible
+        ssh = create_ssh_client(ansible_ip)
+        if not ssh:
+            print("Échec de la connexion SSH.")
+            return False
+
+        # Télécharger Hadoop et configurer
+        commands = [
+            'sudo apt update && sudo apt install -y wget openjdk-11-jdk net-tools sshpass pdsh',
+            'sudo apt install -y python3 python3-pip',
+            'sudo apt install -y ansible',
+
+            #########################################jareb
+            'mkdir -p ~/.ssh',
+            '[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa',
+            f'ssh-keyscan -H {ansible_ip} >> ~/.ssh/known_hosts',
+            f'ssh-keyscan -H {namenode_ip} >> ~/.ssh/known_hosts',
+            f'ssh-keyscan -H {standby_ip} >> ~/.ssh/known_hosts',
+            f'ssh-keyscan -H {datanode_ips } >> ~/.ssh/known_hosts',
+        ]
+        # Ajout des commandes pour copier la clé SSH sur chaque datanode
+        for ip in datanode_ips:
+            commands.append(f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{ip}')
+
+        # Ajout des commandes pour copier la clé SSH sur d'autres hôtes
+        commands.extend([
+            f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{ansible_ip}',
+            f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{namenode_ip}',
+            f'sshpass -p "molka" ssh-copy-id -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa.pub molka@{standby_ip}',
+
+            'chmod 600 ~/.ssh/id_rsa',
+            'chmod 644 ~/.ssh/id_rsa.pub',
+            'chmod 700 ~/.ssh',
+################################################################################################################################
+#ZOOKEEPER
+#################################################################################################################################
+           'wget https://archive.apache.org/dist/zookeeper/zookeeper-3.6.3/apache-zookeeper-3.6.3-bin.tar.gz',
+           'sudo mv apache-zookeeper-3.6.3-bin.tar.gz /tmp',
+
+           # Copier vers Namenode et Standby
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/apache-zookeeper-3.6.3-bin.tar.gz molka@{namenode_ip}:/tmp/',
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/apache-zookeeper-3.6.3-bin.tar.gz molka@{standby_ip}:/tmp/',
+            # Copier vers seulement le premier datanode (pour avoir 3 nœuds ZooKeeper)
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /tmp/apache-zookeeper-3.6.3-bin.tar.gz molka@{datanode_ips[0]}:/tmp/',
+
+            # Créer /etc/zookeeper et déplacer le fichier
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /etc/zookeeper && sudo mv /tmp/apache-zookeeper-3.6.3-bin.tar.gz /etc/zookeeper/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /etc/zookeeper && sudo mv /tmp/apache-zookeeper-3.6.3-bin.tar.gz /etc/zookeeper/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /etc/zookeeper && sudo mv /tmp/apache-zookeeper-3.6.3-bin.tar.gz /etc/zookeeper/"',
+
+            # Extraire Zookeeper
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "cd /etc/zookeeper && sudo tar xzf apache-zookeeper-3.6.3-bin.tar.gz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "cd /etc/zookeeper && sudo tar xzf apache-zookeeper-3.6.3-bin.tar.gz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "cd /etc/zookeeper && sudo tar xzf apache-zookeeper-3.6.3-bin.tar.gz --strip-components=1"',
+
+            # Renommer zoo_sample.cfg en zoo.cfg
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mv /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mv /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mv /etc/zookeeper/conf/zoo_sample.cfg /etc/zookeeper/conf/zoo.cfg"',
+
+            # Créer d'abord le dossier puis écrire l'ID
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /var/lib/zookeeper && echo 1 | sudo tee /var/lib/zookeeper/myid"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /var/lib/zookeeper && echo 2 | sudo tee /var/lib/zookeeper/myid"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /var/lib/zookeeper && echo 3 | sudo tee /var/lib/zookeeper/myid"',
+
+            # 📂 Ajouter la création des dossiers logs avec bonne permission
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /etc/zookeeper/logs /var/lib/zookeeper /var/log/zookeeper && sudo chown -R molka:molka /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && sudo chmod -R 755 /etc/zookeeper"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /etc/zookeeper/logs /var/lib/zookeeper /var/log/zookeeper && sudo chown -R molka:molka /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && sudo chmod -R 755 /etc/zookeeper"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /etc/zookeeper/logs /var/lib/zookeeper /var/log/zookeeper && sudo chown -R molka:molka /etc/zookeeper /var/lib/zookeeper /var/log/zookeeper && sudo chmod -R 755 /etc/zookeeper"',
+ 
+################################################################################################################################
+            'wget https://archive.apache.org/dist/spark/spark-3.3.1/spark-3.3.1-bin-hadoop3.tgz && sudo mv spark-3.3.1-bin-hadoop3.tgz /tmp',
+
+            'sudo chown -R molka:molka /opt',
+            # Copier vers Namenode et Standby
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/spark-3.3.1-bin-hadoop3.tgz molka@{namenode_ip}:/tmp/',
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/spark-3.3.1-bin-hadoop3.tgz molka@{standby_ip}:/tmp/',
+            # Copier vers seulement le premier datanode (pour avoir 3 nœuds ZooKeeper)
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /tmp/spark-3.3.1-bin-hadoop3.tgz molka@{datanode_ips[0]}:/tmp/',
+
+            # Créer /opt/spark et déplacer le fichier
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /opt/spark && sudo mv /tmp/spark-3.3.1-bin-hadoop3.tgz /opt/spark/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /opt/spark && sudo mv /tmp/spark-3.3.1-bin-hadoop3.tgz /opt/spark/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /opt/spark && sudo mv /tmp/spark-3.3.1-bin-hadoop3.tgz /opt/spark/"',
+
+            # Extraire spark
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "cd /opt/spark && sudo tar xzf spark-3.3.1-bin-hadoop3.tgz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "cd /opt/spark && sudo tar xzf spark-3.3.1-bin-hadoop3.tgz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "cd /opt/spark && sudo tar xzf spark-3.3.1-bin-hadoop3.tgz --strip-components=1"',
+
+            # 📂 Créer le dossier logs de Spark avec les bonnes permissions sur chaque nœud
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /opt/spark/logs && sudo chown -R molka:molka /opt/spark/logs && sudo chown -R molka:molka /opt/spark && sudo chmod -R 755 /opt/spark"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /opt/spark/logs && sudo chown -R molka:molka /opt/spark/logs && sudo chown -R molka:molka /opt/spark && sudo chmod -R 755 /opt/spark"',
+            f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "sudo mkdir -p /opt/spark/logs && sudo chown -R molka:molka /opt/spark/logs && sudo chown -R molka:molka /opt/spark && sudo chmod -R 755 /opt/spark"',
+
+################################################################################################################################
+#HADOOP
+#################################################################################################################################
+            'wget https://archive.apache.org/dist/hadoop/common/hadoop-3.3.1/hadoop-3.3.1.tar.gz',
+            'sudo mv hadoop-3.3.1.tar.gz /tmp',
+            'sudo chown -R molka:molka /opt',
+            # Copier vers Namenode et Standby
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/hadoop-3.3.1.tar.gz molka@{namenode_ip}:/tmp/',
+            f'scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/hadoop-3.3.1.tar.gz molka@{standby_ip}:/tmp/',
+            f'for datanode in {" ".join(datanode_ips)}; do sshpass -p "molka" scp -o StrictHostKeyChecking=no /tmp/hadoop-3.3.1.tar.gz molka@${{datanode}}:/tmp/; done',
+
+            # Créer /opt/hadoop et déplacer le fichier
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "sudo mkdir -p /opt/hadoop && sudo mv /tmp/hadoop-3.3.1.tar.gz /opt/hadoop/"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "sudo mkdir -p /opt/hadoop && sudo mv /tmp/hadoop-3.3.1.tar.gz /opt/hadoop/"',
+            f'for datanode in {" ".join(datanode_ips)}; do ssh -o StrictHostKeyChecking=no molka@${{datanode}} "sudo mkdir -p /opt/hadoop && sudo mv /tmp/hadoop-3.3.1.tar.gz /opt/hadoop/"; done',
+
+            # Extraire hadoop
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "cd /opt/hadoop && sudo tar xzf hadoop-3.3.1.tar.gz --strip-components=1"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "cd /opt/hadoop && sudo tar xzf hadoop-3.3.1.tar.gz --strip-components=1"',
+            f'for datanode in {" ".join(datanode_ips)}; do ssh -o StrictHostKeyChecking=no molka@${{datanode}} "cd /opt/hadoop && sudo tar xzf hadoop-3.3.1.tar.gz --strip-components=1"; done',
+################################################################################################################################
+            
+#BASHRC
+#################################################################################################################################
+            # modification ."bashrc
+          ############################################
+            'echo "export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> /home/molka/.bashrc',
+            'echo "export HADOOP_HOME=/opt/hadoop" >> /home/molka/.bashrc',
+            'echo "export ZOOKEEPER_HOME=/etc/zookeeper" >> /home/molka/.bashrc',
+            'echo "export ZOO_LOG_DIR=/var/log/zookeeper" >> /home/molka/.bashrc',
+            'echo "export SPARK_HOME=/opt/spark" >> /home/molka/.bashrc',
+            'echo "export PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin:$HADOOP_HOME/sbin:$SPARK_HOME/bin:$SPARK_HOME/sbin:$ZOOKEEPER_HOME/bin" >> /home/molka/.bashrc',
+            
+            # Copie du .bashrc sur les différents nœuds
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{ansible_ip}:/home/molka/.bashrc',
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{namenode_ip}:/home/molka/.bashrc',
+            f'sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@{standby_ip}:/home/molka/.bashrc',
+            f'for datanode in {" ".join(datanode_ips)}; do sshpass -p "molka" scp -o StrictHostKeyChecking=no /home/molka/.bashrc molka@${{datanode}}:/home/molka/.bashrc; done',
+             
+              # Recharger le .bashrc pour que les changements prennent effet immédiatement (source)
+            f'ssh -o StrictHostKeyChecking=no molka@{ansible_ip} "source /home/molka/.bashrc"',
+            f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "source /home/molka/.bashrc"',
+            f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "source /home/molka/.bashrc"',
+            f'for datanode in {" ".join(datanode_ips)}; do ssh -o StrictHostKeyChecking=no molka@${{datanode}} "source /home/molka/.bashrc"; done',
+          
+################################################################################################################################
+#################################################################################################################################
+
+            # 📂 Créer le dossier "templates" pour Ansible
+            'mkdir -p ~/templates',
+            # 📝 Ajouter les fichiers de configuration Hadoop
+            # core-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>fs.defaultFS</name>\n        <value>hdfs://ha-cluster</value>\n    </property>\n    <property>\n        <name>dfs.client.failover.proxy.provider.ha-cluster</name>\n        <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>\n    </property>\n    <property>\n        <name>ha.zookeeper.quorum</name>\n        <value>{% for zk in groups[\'zookeeper\'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>\n    </property>\n    <property>\n        <name>dfs.permissions.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>ipc.client.connect.max.retries</name>\n        <value>3</value>\n    </property>\n</configuration>" > ~/templates/core-site.xml.j2',
+            
+            # hdfs-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>dfs.replication</name>\n        <value>2</value>\n    </property>\n    <property>\n        <name>dfs.nameservices</name>\n        <value>ha-cluster</value>\n    </property>\n    <property>\n        <name>dfs.ha.namenodes.ha-cluster</name>\n        <value>{{ groups[\'namenode\'][0] }},{{ groups[\'standby\'][0] }}</value>\n    </property>\n    <property>\n        <name>dfs.namenode.rpc-address.ha-cluster.{{ groups[\'namenode\'][0] }}</name>\n        <value>{{ hostvars[groups[\'namenode\'][0]].ansible_host }}:8020</value>\n    </property>\n    <property>\n        <name>dfs.namenode.rpc-address.ha-cluster.{{ groups[\'standby\'][0] }}</name>\n        <value>{{ hostvars[groups[\'standby\'][0]].ansible_host }}:8020</value>\n    </property>\n    <property>\n        <name>dfs.namenode.http-address.ha-cluster.{{ groups[\'namenode\'][0] }}</name>\n        <value>{{ hostvars[groups[\'namenode\'][0]].ansible_host }}:50070</value>\n    </property>\n    <property>\n        <name>dfs.namenode.http-address.ha-cluster.{{ groups[\'standby\'][0] }}</name>\n        <value>{{ hostvars[groups[\'standby\'][0]].ansible_host }}:50070</value>\n    </property>\n    <property>\n        <name>dfs.namenode.shared.edits.dir</name>\n        <value>qjournal://{% for jn in groups[\'journalnode\'] %}{{ hostvars[jn].ansible_host }}:8485{% if not loop.last %};{% endif %}{% endfor %}/ha-cluster</value>\n    </property>\n    <property>\n        <name>dfs.ha.automatic-failover.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>dfs.client.failover.proxy.provider.ha-cluster</name>\n        <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>\n    </property>\n    <property>\n        <name>ha.zookeeper.quorum</name>\n        <value>{% for zk in groups[\'zookeeper\'] %}{{ hostvars[zk].ansible_host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>\n    </property>\n    <property>\n        <name>dfs.namenode.name.dir</name>\n        <value>file:{{ hadoop_home }}/data/hdfs/namenode</value>\n    </property>\n    <property>\n        <name>dfs.datanode.data.dir</name>\n        <value>file:{{ hadoop_home }}/data/hdfs/datanode</value>\n    </property>\n    <property>\n        <name>dfs.namenode.checkpoint.dir</name>\n        <value>file:{{ hadoop_home }}/data/hdfs/namesecondary</value>\n    </property>\n    <property>\n        <name>dfs.ha.fencing.methods</name>\n        <value>shell(/bin/true)</value>\n    </property>\n    <property>\n        <name>dfs.ha.failover-controller.active-standby-elector.zk.op.retries</name>\n        <value>3</value>\n    </property>\n</configuration>" > ~/templates/hdfs-site.xml.j2',
+            
+            # yarn-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>yarn.resourcemanager.ha.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.cluster-id</name>\n        <value>yarn-cluster</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.ha.rm-ids</name>\n        <value>rm1,rm2</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.zk-address</name>\n        <value>{% for host in groups[\'zookeeper\'] %}{{ host }}:2181{% if not loop.last %},{% endif %}{% endfor %}</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.hostname.rm1</name>\n        <value>{{ groups[\'resourcemanager\'][0] }}</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.hostname.rm2</name>\n        <value>{{ groups[\'resourcemanager_standby\'][0] }}</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.recovery.enabled</name>\n        <value>true</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.store.class</name>\n        <value>org.apache.hadoop.yarn.server.resourcemanager.recovery.ZKRMStateStore</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.webapp.address.rm1</name>\n        <value>{{ groups[\'resourcemanager\'][0] }}:8088</value>\n    </property>\n    <property>\n        <name>yarn.resourcemanager.webapp.address.rm2</name>\n        <value>{{ groups[\'resourcemanager_standby\'][0] }}:8088</value>\n    </property>\n    <property>\n        <name>yarn.nodemanager.resource.memory-mb</name>\n        <value>4096</value>\n    </property>\n    <property>\n        <name>yarn.nodemanager.resource.cpu-vcores</name>\n        <value>4</value>\n    </property>\n</configuration>" > ~/templates/yarn-site.xml.j2',
+            
+            # mapred-site.xml.j2
+            'echo "<configuration>\n    <property>\n        <name>mapreduce.framework.name</name>\n        <value>yarn</value>\n    </property>\n</configuration>" > ~/templates/mapred-site.xml.j2',
+
+            # masters.j2
+            'echo "{{ groups[\'namenode\'][0] }}" > ~/templates/masters.j2',
+
+            # workers.j2
+            'echo "{% for worker in groups[\'datanodes\'] %}{{ worker }}\n{% endfor %}" > ~/templates/workers.j2',
+
+            # zoo.cfg.j2
+            'echo "tickTime=2000\ninitLimit=10\nsyncLimit=5\ndataDir=/var/lib/zookeeper\ndataLogDir=/var/log/zookeeper\nclientPort=2181\n{% for zk in groups[\'zookeeper\'] %}server.{{ loop.index }}={{ hostvars[zk].ansible_host }}:2888:3888\n{% endfor %}" > ~/templates/zoo.cfg.j2',
+
+            # spark-env.sh.j2
+            'echo "export HADOOP_CONF_DIR={{ hadoop_home }}/etc/hadoop\nexport SPARK_HOME=/opt/spark\nexport SPARK_DIST_CLASSPATH=$({{ hadoop_home }}/bin/hadoop classpath)\nexport JAVA_HOME={{ java_home }}" > ~/templates/spark-env.sh.j2',
+
+            # spark-defaults.conf.j2
+            'echo "spark.master                     yarn\nspark.eventLog.enabled           true\nspark.eventLog.dir               hdfs://ha-cluster/spark-logs\nspark.history.fs.logDirectory    hdfs://ha-cluster/spark-logs\nspark.serializer                 org.apache.spark.serializer.KryoSerializer\nspark.hadoop.yarn.resourcemanager.ha.enabled   true\nspark.hadoop.yarn.resourcemanager.ha.rm-ids    rm1,rm2\nspark.hadoop.yarn.resourcemanager.hostname.rm1 {{ groups[\'resourcemanager\'][0] }}\nspark.hadoop.yarn.resourcemanager.hostname.rm2 {{ groups[\'resourcemanager_standby\'][0] }}\nspark.driver.memory              1g\nspark.executor.memory            2g\nspark.hadoop.yarn.resourcemanager.address {{ groups[\'resourcemanager\'][0] }}:8032\nspark.hadoop.yarn.resourcemanager.scheduler.address {{ groups[\'resourcemanager\'][0] }}:8030" > ~/templates/spark-defaults.conf.j2',
+            # hosts.j2
+            'echo "# ANSIBLE GENERATED HOSTS FILE\n{% for host in groups[\'all\'] %}{{ hostvars[host].ansible_host }} {{ host }}\n{% endfor %}" > ~/templates/hosts.j2',
+            
+            # Créer le fichier inventory.ini
+            f'echo """[namenode]\n{namenode_ip} ansible_host={namenode_ip}\n{standby_ip} ansible_host={standby_ip}\n\n[spark]\n{namenode_ip} ansible_host={namenode_ip}\n\n[standby]\n{standby_ip} ansible_host={standby_ip}\n\n[datanodes]\n{"\n".join([f"{ip} ansible_host={ip}" for ip in datanode_ips])}\n\n[resourcemanager]\n{namenode_ip} ansible_host={namenode_ip}\n\n[resourcemanager_standby]\n{standby_ip} ansible_host={standby_ip}\n\n[zookeeper]\n{namenode_ip} ansible_host={namenode_ip}\n{standby_ip} ansible_host={standby_ip}\n{datanode_ips[0]} ansible_host={datanode_ips[0]}\n\n[journalnode]\n{namenode_ip} ansible_host={namenode_ip}\n{standby_ip} ansible_host={standby_ip}\n{datanode_ips[0]} ansible_host={datanode_ips[0]}\n\n[all:vars]\nansible_user=molka\nansible_ssh_private_key_file=~/.ssh/id_rsa\nansible_ssh_common_args=-o StrictHostKeyChecking=no\nansible_python_interpreter=/usr/bin/python3""" > ~/inventory.ini'        
+            ])
+        
+        for idx, command in enumerate(commands, start=1):
+            print(f"\n[Commande {idx}/{len(commands)}] Exécution : {command}")
+            exit_status, output, error = execute_ssh_command(ssh, command)
+
+            if exit_status == 0:
+                print(f"✅ Commande réussie : {command}")
+            else:
+                print(f"❌ Erreur lors de l'exécution de la commande : {command}")
+                print(f"Code de sortie : {exit_status}")
+                print(f"Message d'erreur :\n{error.strip()}")
+                ssh.close()
+                return False  # Stop dès qu'une commande échoue        
+        # Définir les playbooks avec une syntaxe YAML correcte
+        playbooks = {
+            'deploy_hadoop.yml': """---
+- name: Déploiement Hadoop via extraction
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # 1. Créer /opt si nécessaire
+    - name: Créer répertoire /opt
+      file:
+        path: /opt
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # 2. Installer les dépendances
+    - name: Installer paquets requis
+      apt:
+        name:
+          - openjdk-11-jdk
+          - sshpass
+          - net-tools
+          - pdsh
+          - rsync
+          - tar
+        state: present
+        update_cache: yes
+
+""",
+          'hadoop_config.yml': """---
+- name: Configurer les fichiers de configuration Hadoop et /etc/hosts
+  hosts: all
+  become: yes
+  vars:
+    namenode_hostname: "{{ groups['namenode'][0] }}"
+    standby_hostname: "{{ groups['standby'][0] | default('default_standby_hostname') }}"
+    hadoop_home: /opt/hadoop  # Ajout de la variable hadoop_home
+
+  tasks:
+    - name: Déployer core-site.xml
+      template:
+        src: /home/molka/templates/core-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/core-site.xml"
+
+    - name: Déployer hdfs-site.xml
+      template:
+        src: /home/molka/templates/hdfs-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/hdfs-site.xml"
+
+    - name: Déployer yarn-site.xml
+      template:
+        src: /home/molka/templates/yarn-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/yarn-site.xml"
+
+    - name: Déployer mapred-site.xml
+      template:
+        src: /home/molka/templates/mapred-site.xml.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/mapred-site.xml"
+
+    - name: Déployer masters
+      template:
+        src: /home/molka/templates/masters.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/masters"
+
+    - name: Déployer workers
+      template:
+        src: /home/molka/templates/workers.j2
+        dest: "{{ hadoop_home }}/etc/hadoop/workers"
+
+    - name: Déployer zoo.cfg pour ZooKeeper
+      template:
+        src: /home/molka/templates/zoo.cfg.j2
+        dest: "/etc/zookeeper/conf/zoo.cfg"
+
+    - name: Mettre à jour /etc/hosts avec les hôtes du cluster
+      template:
+        src: /home/molka/templates/hosts.j2
+        dest: /etc/hosts
+
+- name: Configurer les nœuds Spark  # <-- Début d'une NOUVELLE play
+  hosts: spark                      # Aligné avec '- name'
+  become: yes                       # Aligné avec 'hosts'
+  tasks:
+    - name: Créer le répertoire de configuration Spark
+      file:                         # Aligné sous 'tasks'
+        path: /opt/spark/conf
+        state: directory
+        owner: molka
+        group: molka
+        mode: 0755
+
+    - name: Déployer spark-defaults.conf
+      template:                     # Aligné sous 'tasks'
+        src: /home/molka/templates/spark-defaults.conf.j2
+        dest: "/opt/spark/conf/spark-defaults.conf"
+
+    - name: Déployer spark-env.sh
+      template:                    # Aligné sous 'tasks'
+        src: /home/molka/templates/spark-env.sh.j2
+        dest: "/opt/spark/conf/spark-env.sh"
+        
+""",
+            'hadoop_start.yml': """---
+- name: Vérifier et démarrer ZooKeeper sur les nœuds ZooKeeper
+  hosts: zookeeper
+  become: yes
+  vars:
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+    hadoop_home: "/opt/hadoop"
+    zookeeper_home: "/etc/zookeeper"
+  tasks:
+    - name: Vérifier la configuration de ZooKeeper
+      stat:
+        path: "{{ zookeeper_home }}/conf/zoo.cfg"
+      register: zoo_cfg_exists
+
+    - name: Afficher le contenu de zoo.cfg
+      shell: "cat {{ zookeeper_home }}/conf/zoo.cfg"
+      register: zoo_cfg_content
+      when: zoo_cfg_exists.stat.exists
+      
+    - name: Afficher le contenu de zoo.cfg
+      debug:
+        var: zoo_cfg_content.stdout_lines
+      when: zoo_cfg_exists.stat.exists
+    
+    - name: Créer le répertoire /var/lib/zookeeper s'il n'existe pas
+      file:
+        path: /var/lib/zookeeper
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+
+    - name: Déplacer le fichier myid vers /var/lib/zookeeper
+      command: mv /etc/zookeeper/myid /var/lib/zookeeper/myid
+      args:
+        removes: /etc/zookeeper/myid
+      become_user: molka
+      ignore_errors: yes
+
+    - name: Stopper ZooKeeper si déjà en cours d'exécution
+      shell: "{{ zookeeper_home }}/bin/zkServer.sh stop"
+      become_user: molka
+      environment:
+        ZOO_LOG_DIR: "/var/log/zookeeper"
+        ZOO_CONF_DIR: "{{ zookeeper_home }}/conf"
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+      
+    - name: Attendre que ZooKeeper s'arrête
+      pause:
+        seconds: 5
+    
+    - name: Démarrer ZooKeeper
+      shell: "{{ zookeeper_home }}/bin/zkServer.sh start"
+      become_user: molka
+      environment:
+        ZOO_LOG_DIR: "/var/log/zookeeper"
+        ZOO_CONF_DIR: "{{ zookeeper_home }}/conf"
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      register: zk_status
+      
+    - name: Attendre le démarrage de ZooKeeper
+      pause:
+        seconds: 10
+        
+    - name: Vérifier le démarrage de ZooKeeper
+      shell: "{{ zookeeper_home }}/bin/zkServer.sh status"
+      become_user: molka
+      environment:
+        ZOO_LOG_DIR: "/var/log/zookeeper"
+        ZOO_CONF_DIR: "{{ zookeeper_home }}/conf"
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      register: zk_status_check
+      ignore_errors: yes
+      
+    - name: Afficher le statut de ZooKeeper
+      debug:
+        var: zk_status_check.stdout
+        
+    - name: Afficher les journaux ZooKeeper
+      shell: "tail -n 30 /var/log/zookeeper/zookeeper.log"
+      become_user: molka
+      register: zk_logs
+      ignore_errors: yes
+      
+    - name: Afficher les journaux de ZooKeeper
+      debug:
+        var: zk_logs.stdout_lines
+    
+    - name: Créer les répertoires de logs
+      file:
+        path: /opt/hadoop/logs
+        state: directory
+        owner: molka
+        group: molka
+        mode: 0755
+    
+    - name: Configurer hadoop-env.sh
+      lineinfile:
+        path: /opt/hadoop/etc/hadoop/hadoop-env.sh
+        line: "export JAVA_HOME={{ java_home }}"
+        state: present 
+
+- name: Créer le dossier Spark dans HDFS
+  hosts: namenode
+  become: yes
+  tasks:
+    - name: Créer le dossier Spark logs
+      file:
+        path: /spark-logs
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: 0755
+      when: inventory_hostname == groups['namenode'][0]
+                                            
+- name: Configuration des JournalNodes
+  hosts: zookeeper
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Créer le répertoire JournalNode
+      file:
+        path: /opt/hadoop/data/hdfs/journalnode
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+
+    - name: Démarrer JournalNode en arrière-plan
+      shell: "nohup {{ hadoop_home }}/bin/hdfs --daemon start journalnode > /tmp/journalnode.log 2>&1 &"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+        HADOOP_LOG_DIR: "/opt/hadoop/logs"
+      args:
+        executable: /bin/bash
+
+    - name: Attendre le démarrage du JournalNode
+      pause:
+        seconds: 10
+
+    - name: Vérifier que le JournalNode est actif
+      wait_for:
+        port: 8485
+        timeout: 60
+        
+    - name: Vérifier les journaux du JournalNode
+      shell: "tail -n 30 {{ hadoop_home }}/logs/hadoop-molka-journalnode-*.log"
+      become_user: molka
+      register: jn_logs
+      ignore_errors: yes
+      
+    - name: Afficher les journaux du JournalNode
+      debug:
+        var: jn_logs.stdout_lines
+
+- name: Nettoyer et démarrer les services sur le NameNode actif
+  hosts: namenode
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Nettoyer les processus existants
+      shell: "ps -ef | grep -i hadoop | grep -v grep | awk '{print $2}' | xargs -r kill"
+      become_user: molka
+      ignore_errors: yes
+      
+    - name: Attendre que tous les processus s'arrêtent
+      pause:
+        seconds: 5
+
+    - name: Initialiser HA dans ZooKeeper
+      shell: "{{ hadoop_home }}/bin/hdfs zkfc -formatZK -force -nonInteractive"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['namenode'][0]
+      register: zkfc_result
+      failed_when: false
+      
+    - name: Afficher le résultat de formatZK
+      debug:
+        var: zkfc_result
+      when: inventory_hostname == groups['namenode'][0]
+                                                          
+    - name: Créer le répertoire namenode
+      file:
+        path: "{{ hadoop_home }}/data/hdfs/namenode"
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+                                                                                                                               
+    - name: Formater le NameNode (si nécessaire)
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"
+      args:
+        creates: "{{ hadoop_home }}/data/hdfs/namenode/current/VERSION"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      when: inventory_hostname == groups['namenode'][0]
+      
+    - name: Démarrer le NameNode explicitement
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start namenode"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+        
+    - name: Démarrer ZKFC explicitement
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start zkfc"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+        
+    - name: Attendre que le NameNode commence à écouter
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 8020
+        timeout: 60
+                                            
+    - name: Démarrer les autres services HDFS
+      shell: "{{ hadoop_home }}/sbin/start-dfs.sh"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+- name: Vérifier la connectivité entre nœuds
+  hosts: standby
+  become: yes
+  tasks:
+    - name: Vérifier la connectivité avec le NameNode actif
+      shell: "ping -c 4 {{ groups['namenode'][0] }}"
+      register: ping_result
+      ignore_errors: yes
+      
+    - name: Afficher le résultat du ping
+      debug:
+        var: ping_result.stdout_lines
+        
+    - name: Vérifier le port 8020 sur le NameNode actif
+      shell: "nc -zv {{ groups['namenode'][0] }} 8020"
+      register: nc_result
+      ignore_errors: yes
+      
+    - name: Afficher le résultat de la vérification de port
+      debug:
+        var: nc_result
+
+- name: Configurer le NameNode standby
+  hosts: standby
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Créer le répertoire standby namenode
+      file:
+        path: "{{ hadoop_home }}/data/hdfs/namenode"
+        state: directory
+        owner: molka
+        group: molka
+        mode: '0755'
+        
+    - name: Bootstrap du standby avec timeout augmenté
+      shell: "{{ hadoop_home }}/bin/hdfs namenode -bootstrapStandby -force"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+        HADOOP_CLIENT_OPTS: "-Dfs.defaultFS=hdfs://{{ groups['namenode'][0] }}:8020 -Ddfs.namenode.rpc-address.nn1={{ groups['namenode'][0] }}:8020"
+      register: bootstrap_result
+      failed_when: false
+      
+    - name: Afficher le résultat du bootstrap
+      debug:
+        var: bootstrap_result
+        
+    - name: Démarrer le standby NameNode
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start namenode"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+      
+    - name: Démarrer ZKFC sur le standby
+      shell: "{{ hadoop_home }}/bin/hdfs --daemon start zkfc"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+- name: Démarrer YARN sur les ResourceManagers
+  hosts: resourcemanager
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Démarrer Ressource Manager Active
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start resourcemanager"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['resourcemanager'][0]
+      ignore_errors: yes
+
+    - name: Attendre le démarrage du ResourceManager actif
+      pause:
+        seconds: 10
+      when: inventory_hostname == groups['resourcemanager'][0]                                                                                        
+                                            
+    - name: Démarrer YARN
+      shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes                                      
+                                                  
+    - name: Démarrer explicitement le ResourceManager en arrière-plan
+      shell: "nohup {{ hadoop_home }}/bin/yarn --daemon start resourcemanager > /tmp/resourcemanager.log 2>&1 &"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes                                      
+
+    - name: Pause pour démarrage du ResourceManager
+      pause:
+        seconds: 20 
+
+- name: Restart ResourceManagers Standby
+  hosts: resourcemanager_standby
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:
+    - name: Stopper Ressource Manager standby
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh stop resourcemanager"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+      ignore_errors: yes
+
+    - name: Attendre l'arrêt du ResourceManager standby
+      pause:
+        seconds: 10
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+      
+    - name: Démarrer Ressource Manager Standby
+      shell: "{{ hadoop_home }}/sbin/yarn-daemon.sh start resourcemanager"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == groups['resourcemanager_standby'][0]
+      ignore_errors: yes
+
+- name: Re-Démarrer YARN sur tous les nœuds
+  hosts: resourcemanager
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+    java_home: "/usr/lib/jvm/java-11-openjdk-amd64"
+  tasks:                                            
+    - name: Démarrer YARN
+      shell: "{{ hadoop_home }}/sbin/start-yarn.sh"
+      become_user: molka
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      args:
+        executable: /bin/bash
+      ignore_errors: yes  
+                                                                                        
+- name: Vérifier les services Hadoop (jps)
+  hosts: all
+  become: yes
+  vars:
+    hadoop_home: "/opt/hadoop"
+  tasks:
+    - name: Vérifier les processus avec jps
+      shell: "jps"
+      register: jps_output
+      become_user: molka
+      args:
+        executable: /bin/bash
+
+    - name: Afficher la sortie de jps
+      debug:
+        var: jps_output.stdout
+"""
+        }  
+        # Écriture des playbooks dans des fichiers dans le répertoire home
+        for filename, content in playbooks.items():
+            remote_path = f"~/{filename}"  # Chemin vers le home de l'utilisateur
+            command = f'echo "{content.replace("\"", "\\\"")}" > {remote_path}'  # Échapper les guillemets
+
+            print(f"Exécution de la commande pour écrire le playbook : {filename}")
+            exit_status, output, error = execute_ssh_command(ssh, command)
+
+            if exit_status == 0:
+                print(f"✅ Playbook écrit avec succès : {filename}")
+            else:
+                print(f"❌ Erreur lors de l'écriture du playbook : {filename}")
+                print(f"Code de sortie : {exit_status}")
+                print(f"Message d'erreur :\n{error.strip()}")
+                ssh.close()
+                return False  # Stop dès qu'une commande échoue
+
+        # Exécution des playbooks un par un
+        for filename in playbooks.keys():
+            print(f"Exécution du playbook : {filename}")
+            command = f'ansible-playbook ~/{filename} -i ~/inventory.ini -vvv'  # Assurez-vous que l'inventaire est correctement défini
+
+            exit_status, output, error = execute_ssh_command(ssh, command)
+
+            if exit_status == 0:
+                print(f"✅ Exécution réussie du playbook : {filename}")
+            else:
+                print(f"❌ Erreur lors de l'exécution du playbook : {filename}")
+                print(f"Code de sortie : {exit_status}")
+                print(f"Message d'erreur :\n{error.strip()}")
+         # 2. Commandes post-installation structurées
+        post_playbooks_commands = [
+            # Cluster HDFS
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"', "Formatage Namenode"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/hdfs namenode -format -force -clusterId ha-cluster -nonInteractive"', "Formatage Standby"),
+
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/hdfs --daemon start namenode"', "Démarrage Namenode principal"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/hdfs --daemon start namenode"', "Démarrage Namenode secondaire"),
+            
+            # DataNodes
+            *[(f'ssh -o StrictHostKeyChecking=no molka@{ip} "/opt/hadoop/bin/hdfs --daemon start datanode"', f"Démarrage Datanode {ip}") for ip in datanode_ips],
+            *[(f'ssh -o StrictHostKeyChecking=no molka@{ip} "/opt/hadoop/bin/hdfs --daemon start journalnode"', f"Démarrage Journalnode {ip}") for ip in datanode_ips],
+            
+            # ZooKeeper Cluster
+            # Démarrage explicite de ZooKeeper sur Namenode, Standby et Datanode1
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/etc/zookeeper/bin/zkServer.sh start"', f"Démarrage ZooKeeper {namenode_ip}"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/etc/zookeeper/bin/zkServer.sh start"', f"Démarrage ZooKeeper {standby_ip}"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{datanode_ips[0]} "/etc/zookeeper/bin/zkServer.sh start"', f"Démarrage ZooKeeper {datanode_ips[0]}"),
+                          
+            # Mécanismes HA
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/hdfs --daemon start zkfc"', "Démarrage ZKFC principal"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/hdfs --daemon start zkfc"', "Démarrage ZKFC secondaire"),
+            
+            # Services YARN
+            (f'ssh -o StrictHostKeyChecking=no molka@{namenode_ip} "/opt/hadoop/bin/yarn --daemon start resourcemanager"', "Démarrage ResourceManager principal"),
+            (f'ssh -o StrictHostKeyChecking=no molka@{standby_ip} "/opt/hadoop/bin/yarn --daemon start resourcemanager"', "Démarrage ResourceManager secondaire"),
+            *[(f'ssh -o StrictHostKeyChecking=no molka@{ip} "/opt/hadoop/bin/yarn --daemon start nodemanager"', f"Démarrage NodeManager {ip}") for ip in datanode_ips],
+        ]
+        # 3. Exécution séquentielle avec vérification
+        print("\n🚀 Phase de démarrage des services...")
+        for cmd, service_name in post_playbooks_commands:
+            exit_code, output, error = execute_ssh_command(ssh, cmd)
+            
+            if exit_code != 0:
+                print(f"⛔ Échec sur {service_name}")
+                ssh.close()
+                return jsonify({
+                    "status": "error",
+                    "error": f"{service_name} : {error.strip()}", 
+                    "commande": cmd
+                }), 500
+            print(f"✅ {service_name} opérationnel")
+        # Fermez la connexion SSH après l'exécution
+        ssh.close()
+        # Toujours succès à la fin
+        return jsonify({
+            "status": "success",
+            "vms": results,
+            "ip_map": ip_map,
+            "errors": {}
+        })
+
+    except Exception as e:
+        log_step(f"ERREUR FATALE: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "cluster_name": data.get('cluster_name', 'unknown')
+        }), 500
+
+# Fonctions utilitaires (à adapter selon votre implémentation)
+def create_vmprox_direct(data):
+    with app.test_request_context('/create_vmprox', method='POST', json=data):
+        return create_vmprox()
+
+def start_vmprox_direct(data):
+    with app.test_request_context('/start_vmprox', method='POST', json=data):
+        return start_vmprox()
+
+def get_vmip_direct(data):
+    """Nouvelle version simplifiée"""
+    with app.test_request_context('/get_vmip', method='POST', json=data):
+        response = get_vmip()
+        return response.get_json(), response.status_code
+##############################################################################################
+#AYOUB
+#################################################################################################################################
+#################################################################################################################################
+ ####################################################################################################
 @app.route('/get-remote-cpu-info', methods=['POST'])
 def get_remote_cpu_info():
     """
