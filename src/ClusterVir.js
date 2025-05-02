@@ -2,19 +2,18 @@ import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 const ClusterVir = () => {
-  const [clusterName, setClusterName] = useState("");
-  const [clusterDescription, setClusterDescription] = useState("");
-  const [clusterIp, setClusterIp] = useState("");
-  const [nodeCount, setNodeCount] = useState(3);
+  const navigate = useNavigate();
+
+  const [clusterName, setClusterName] = useState("aa");
+  const [clusterDescription, setClusterDescription] = useState("ttt");
+  const [nodeCount, setNodeCount] = useState(1);
   const [clusterType, setClusterType] = useState({
     Ha: false,
+    Spark: false,
     Classic: true,
   });
-  // Nouveaux champs pour la configuration réseau
-  const [gateway, setGateway] = useState("192.168.0.1");
-  const [nameservers, setNameservers] = useState("8.8.8.8,8.8.4.4");
-
-  const navigate = useNavigate();
+  const [isHaSelected, setIsHaSelected] = useState(false);
+  const [isSparkSelected, setIsSparkSelected] = useState(false);
 
   const handleClusterTypeChange = (e) => {
     const { name, checked } = e.target;
@@ -22,35 +21,28 @@ const ClusterVir = () => {
       ...prev,
       [name]: checked,
     }));
-    
-    // Mettez à jour isHaSelected en fonction du type de cluster
     if (name === "Ha") {
       setIsHaSelected(checked);
     }
+    if (name === "Spark") {
+      setIsSparkSelected(checked);
+    }
   };
-  
-  const [isHaSelected, setIsHaSelected] = useState(false);
 
   const handleSubmit = (e) => {
     e.preventDefault();
-
-    // Préparer les données globales du cluster
     const clusterData = {
       clusterName,
       clusterDescription,
-      clusterIp,
       nodeCount,
       clusterType,
-      gateway, // adresse de la passerelle
-      nameservers,
-      isHaSelected, // sous forme de chaîne, transformation dans l'étape suivante
-      nodeDetails: [], // à compléter dans l'étape suivante
+      isHaSelected,
+      isSparkSelected,
+      nodeDetails: [], // À compléter dans la configuration des nœuds
     };
 
-    // On passe ces données vers la page de configuration des nœuds
-    navigate("/ClusterformVir", {
-      state: clusterData,
-    });
+    // Passage des données vers le formulaire de configuration des nœuds
+    navigate("/ClusterformVir", { state: clusterData });
   };
 
   const handleDashboardClick = () => {
@@ -92,51 +84,20 @@ const ClusterVir = () => {
           required
         />
 
-        {/* Cluster IP */}
-        <label className="block text-sm font-medium mb-2">Cluster IP Address:</label>
-        <input
-          type="text"
-          value={clusterIp}
-          onChange={(e) => setClusterIp(e.target.value)}
-          placeholder="Enter cluster IP address"
-          className="w-full p-2 border rounded mb-4"
-          required
-        />
-
-        {/* Gateway */}
-        <label className="block text-sm font-medium mb-2">Gateway IP:</label>
-        <input
-          type="text"
-          value={gateway}
-          onChange={(e) => setGateway(e.target.value)}
-          placeholder="Enter gateway IP"
-          className="w-full p-2 border rounded mb-4"
-          required
-        />
-
-        {/* Nameservers */}
-        <label className="block text-sm font-medium mb-2">Nameservers (comma separated):</label>
-        <input
-          type="text"
-          value={nameservers}
-          onChange={(e) => setNameservers(e.target.value)}
-          placeholder="e.g., 8.8.8.8,8.8.4.4"
-          className="w-full p-2 border rounded mb-4"
-          required
-        />
-
         {/* Number of Nodes */}
-        <label className="block text-sm font-medium mb-2">Number of Nodes: {nodeCount}</label>
+        <label className="block text-sm font-medium mb-2">
+          Number of Nodes: {nodeCount}
+        </label>
         <input
           type="range"
           min="1"
           max="10"
           value={nodeCount}
-          onChange={(e) => setNodeCount(e.target.value)}
+          onChange={(e) => setNodeCount(Number(e.target.value))}
           className="w-full mb-4"
         />
 
-        {/* Cluster Type: HA or Classic */}
+        {/* Cluster Type: HA, Classic et Spark */}
         <label className="block text-sm font-medium mb-2">Cluster Type:</label>
         <div className="flex items-center mb-4">
           <label className="mr-4">
@@ -149,7 +110,7 @@ const ClusterVir = () => {
             />
             High Availability (HA)
           </label>
-          <label>
+          <label className="mr-4">
             <input
               type="checkbox"
               name="Classic"
@@ -158,6 +119,16 @@ const ClusterVir = () => {
               className="mr-2"
             />
             Classic
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              name="Spark"
+              checked={clusterType.Spark}
+              onChange={handleClusterTypeChange}
+              className="mr-2"
+            />
+            Spark/YARN
           </label>
         </div>
 

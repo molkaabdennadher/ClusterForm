@@ -1,29 +1,27 @@
-import React, { useState, useEffect } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 
 const ClusterDashVir = () => {
   const location = useLocation();
-  const navigate = useNavigate();
   const [clusterAttempts, setClusterAttempts] = useState([]);
   const [selectedClusterIndex, setSelectedClusterIndex] = useState(null);
-
-  // Définir la fonction handleRowClick
-  const handleRowClick = (index) => {
-    setSelectedClusterIndex(selectedClusterIndex === index ? null : index);
-  };
 
   useEffect(() => {
     // Récupérer les essais depuis localStorage
     const savedAttempts = JSON.parse(localStorage.getItem("clusterAttempts")) || [];
 
     // Vérifier si l'essai actuel (location.state) existe déjà dans savedAttempts
-    if (location.state && !savedAttempts.some(attempt => attempt.clusterName === location.state.clusterName)) {
+    if (location.state && !savedAttempts.some(attempt => attempt.cluster_name === location.state.cluster_name)) {
       savedAttempts.push(location.state);
     }
 
     // Mettre à jour l'état avec les essais mis à jour
     setClusterAttempts(savedAttempts);
-  }, [location.state, navigate]);
+  }, [location.state]);
+
+  const handleRowClick = (index) => {
+    setSelectedClusterIndex(selectedClusterIndex === index ? null : index);
+  };
 
   return (
     <div className="min-h-screen p-4 bg-gradient-to-b from-teal-100 to-white">
@@ -45,23 +43,23 @@ const ClusterDashVir = () => {
             {clusterAttempts.map((attempt, index) => (
               <React.Fragment key={index}>
                 <tr
-                  className={`hover:bg-gray-100 ${
-                    selectedClusterIndex === index ? 'bg-teal-200' : ''
+                  className={`hover:bg-gray-100 cursor-pointer ${
+                    selectedClusterIndex === index ? "bg-teal-200" : ""
                   }`}
-                  onClick={() => handleRowClick(index)} // Utiliser handleRowClick ici
+                  onClick={() => handleRowClick(index)}
                 >
                   <td className="py-2 px-4 border">
                     <select className="border rounded p-1">
                       {/* Options here */}
                     </select>
                   </td>
-                  <td className="py-2 px-4 border">{attempt.clusterName}</td>
+                  <td className="py-2 px-4 border">{attempt.cluster_name}</td>
                   <td className="py-2 px-4 border">{attempt.clusterDescription}</td>
                   <td className="py-2 px-4 border">{attempt.clusterIp}</td>
                   <td className="py-2 px-4 border">{attempt.gateway}</td>
                   <td className="py-2 px-4 border">{attempt.nodeCount}</td>
                   <td className="py-2 px-4 border">
-                    {attempt.clusterType?.Ha ? 'High Availability (HA)' : 'Classic'}
+                    {attempt.clusterType?.Ha ? "High Availability (HA)" : "Classic"}
                   </td>
                 </tr>
                 {selectedClusterIndex === index && (
@@ -88,8 +86,6 @@ const ClusterDashVir = () => {
                             <p className="text-sm text-gray-600">
                               <strong>OS :</strong> {node.osVersion}
                             </p>
-
-                            {/* Afficher les rôles des nœuds sous forme de texte */}
                             <div className="mb-4">
                               <p className="text-sm text-gray-600">
                                 <strong>Rôles :</strong>
@@ -100,17 +96,15 @@ const ClusterDashVir = () => {
                                 {node.isDataNode && <li>Data Node</li>}
                               </ul>
                             </div>
-
-                            {/* Afficher les composants HA (si le cluster est de type HA) */}
                             {attempt.clusterType?.Ha && (
                               <div className="mb-4">
                                 <p className="text-sm text-gray-600">
                                   <strong>Composants HA :</strong>
                                 </p>
                                 <ul className="list-disc list-inside">
-                                  {node.haComponents?.isZookeeper && <li>Zookeeper</li>}
-                                  {node.haComponents?.isNamenodeStandby && <li>Namenode Standby</li>}
-                                  {node.haComponents?.isResourceManagerStandby && (
+                                  {node.isZookeeper && <li>Zookeeper</li>}
+                                  {node.isNameNodeStandby && <li>Namenode Standby</li>}
+                                  {node.isResourceManagerStandby && (
                                     <li>Resource Manager Standby</li>
                                   )}
                                 </ul>

@@ -17,12 +17,26 @@ const OptionSelect = () => {
 
   // Gestion du bouton suivant
   const handleNext = () => {
-    if (selection === "Cluster" && hypervisor === "Proxmox") {
-      navigate("/ajout-serveur-proxmox", { state: { hypervisor, selectedOption: selection } });
-    } else {
-      navigate("/ajout-serveur-proxmox", { state: { selectedOption: selection, hypervisor } });
+    if (!selection) {
+      setError("Veuillez sélectionner une option."); // Gérer l'erreur si aucune option n'est choisie
+      return;
+    }
+  
+    if (hypervisor === "Proxmox") {
+      if (selection === "Cluster") {
+        navigate("/ajout-serveur-proxmox", { state: { hypervisor, selectedOption: selection } });
+      } else {
+        navigate("/ajout-serveur-proxmox", { state: { hypervisor, selectedOption: selection } });
+      }
+    } else if (hypervisor === "VirtualBox") {
+      if (selection === "Cluster") {
+        navigate("/mode-select", { state: { hypervisor, selectedOption: selection } });
+      } else {
+        navigate("/mode-select", { state: { hypervisor, selectedOption: selection } });
+      }
     }
   };
+  
   
 
   // Fonction pour revenir à la page précédente

@@ -1,233 +1,260 @@
-import React, { useState ,useEffect} from "react";
+import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import OSVersionSelect from './OSVersionSelect';
-import CustomBox from './CustomBox';
+import OSVersionSelect from "./OSVersionSelect";
+import CustomBox from "./CustomBox";
+
 export default function ClusterFormVir() {
   const location = useLocation();
   const navigate = useNavigate();
+
+  // Récupération des données du cluster depuis location.state ou valeurs par défaut
+  const {
+    clusterName = "Default Cluster",
+    clusterDescription = "",
+    nodeCount = 3,
+    clusterType = { Ha: false, Spark: false, Classic: true },
+    isHaSelected = false,
+    isSparkSelected = false,
+  } = location.state || {};
+
+  // États pour la gestion des boîtes personnalisées
   const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
-  const [clusterAttempts, setClusterAttempts] = useState([]); // État pour stocker les tentatives
-const [customBoxes, setCustomBoxes] = useState(() => {
-    // Récupérer les boxes personnalisées depuis localStorage
-    const savedBoxes = localStorage.getItem("customBoxes");
-    return savedBoxes ? JSON.parse(savedBoxes) : []; // Si aucune box n'est trouvée, retourner un tableau vide
+  const [customRam, setCustomRam] = useState(4);
+  const [customCpu, setCustomCpu] = useState(2);
+  const [customBoxes, setCustomBoxes] = useState(() => {
+    const saved = localStorage.getItem("customBoxes");
+    return saved ? JSON.parse(saved) : [];
   });
+
+  // Options du système d'exploitation
   const [osOptions, setOsOptions] = useState(() => {
-    const savedOptions = localStorage.getItem("osOptions");
-    return savedOptions ? JSON.parse(savedOptions) : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
+    const saved = localStorage.getItem("osOptions");
+    return saved
+      ? JSON.parse(saved)
+      : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
   });
-  
 
-  // Récupération des données globales du cluster transmises depuis ClusterVir
-  const { clusterName, clusterDescription, nodeCount, clusterType, clusterIp, gateway, nameservers ,isHaSelected} = location.state;
+  // État pour stocker la liste des nœuds (récupérée depuis le formulaire)
+  const [nodeDetails, setNodeDetails] = useState([]);
 
-  const [currentNode, setCurrentNode] = useState(0);
-  const [nodeDetails, setNodeDetails] = useState(
-    Array.from({ length: nodeCount }, () => ({
-      hostname: "",
-      osVersion: "ubuntu/bionic64",
-      ram: 4,
-      cpu: 2,
-      ip: "",
-      nodeDescription: "",
-      isNameNode: false,
-      isResourceManager: false,
-      isDataNode: false,
-    }))
-  );
+  // État pour les données du nœud en cours de saisie
+  const [currentNodeData, setCurrentNodeData] = useState({
+    hostname: "",
+    osVersion: "ubuntu/bionic64", //a voir pour l'image 
+    ram: 4,
+    cpu: 2,
+    ip: "192.168.56.4",
+    nodeDescription: "",
+    isNameNode: true,
+    isNameNodeStandby: isHaSelected ? false : undefined,
+    isResourceManager: true,
+    isResourceManagerStandby: isHaSelected ? false : undefined,
+    isDataNode: true,
+    isNodeManager: false,
+    isZookeeper: isHaSelected ? false : undefined,
+    isJournalNode: isHaSelected ? false : undefined,
+    // Champ pour Spark, initialisé à false
+    isSparkNode: false,
+  });
+
+  // Index du nœud en cours (pour afficher "Node X sur Y")
+  const [currentNodeIndex, setCurrentNodeIndex] = useState(0);
+
+  // Synchronisation des options OS via localStorage
   useEffect(() => {
     const handleStorageChange = (e) => {
       if (e.key === "osOptions") {
         setOsOptions(JSON.parse(e.newValue));
       }
     };
-  
     window.addEventListener("storage", handleStorageChange);
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
-  
 
-  const handleNodeDetailsChange = (field, value) => {
-    setNodeDetails((prev) => {
-      const updatedDetails = [...prev];
-      updatedDetails[currentNode][field] = value;
-      return updatedDetails;
-    });
-  
+  // Mise à jour d'un champ du formulaire pour le nœud en cours
+  const handleFieldChange = (field, value) => {
+    setCurrentNodeData((prev) => ({ ...prev, [field]: value }));
   };
+
+  // Ajouter une boîte personnalisée
   const handleAddCustomBox = ({ name, ram, cpu }) => {
     const updatedBoxes = [...customBoxes, { name, ram, cpu }];
     const updatedOptions = [...osOptions, name];
-  
     setCustomBoxes(updatedBoxes);
     setOsOptions(updatedOptions);
-  
-    // Mettre à jour localStorage
     localStorage.setItem("customBoxes", JSON.stringify(updatedBoxes));
     localStorage.setItem("osOptions", JSON.stringify(updatedOptions));
   };
-  
 
-  const [haComponents, setHaComponents] = useState({
-    isZookeeper: false,
-    isNamenodeStandby: false,
-    isResourceManagerStandby: false,
-  });
-  const handleDashboardClick = () => {
-    navigate("/ClusterDashVir");
-  };
-
-  
+  // Soumettre les données du nœud courant
   const handleSubmit = (e) => {
     e.preventDefault();
-  
-    if (currentNode < nodeCount - 1) {
-      // Passer au formulaire du nœud suivant
-      setCurrentNode(currentNode + 1);
-      // Réinitialiser les détails du nœud suivant
-      setNodeDetails((prev) => {
-        const updatedDetails = [...prev];
-        updatedDetails[currentNode + 1] = {
-          ...updatedDetails[currentNode + 1],
-          hostname: "",
-          ip: "",
-          nodeDescription: "",
-          isNameNode: false,
-          isResourceManager: false,
-          isDataNode: false,
-        };
-        return updatedDetails;
+    if (!currentNodeData.hostname || !currentNodeData.ip) {
+      alert("Veuillez renseigner au moins le hostname et l'IP.");
+      return;
+    }
+    setNodeDetails((prev) => [...prev, currentNodeData]);
+    if (currentNodeIndex < nodeCount - 1) {
+      setCurrentNodeIndex((prev) => prev + 1);
+      setCurrentNodeData({
+        hostname: "",
+        osVersion:  "ubuntu/bionic64",
+        ram: 4,
+        cpu: 2,
+        ip: "",
+        nodeDescription: "",
+        isNameNode: currentNodeIndex === 0,
+        isNameNodeStandby: isHaSelected ? false : undefined,
+        isResourceManager: currentNodeIndex === 0,
+        isResourceManagerStandby: isHaSelected ? false : undefined,
+        isDataNode: true,
+        isNodeManager: true,
+        isZookeeper: isHaSelected ? false : undefined,
+        isJournalNode: isHaSelected ? false : undefined,
+        isSparkNode: false,
       });
     } else {
-      // Au dernier nœud, rassembler toutes les données et appeler l'API
       const clusterData = {
         clusterName,
         clusterDescription,
-        clusterIp,
-        gateway,
         nodeCount,
         clusterType,
-        nodeDetails,
+        isHaSelected,
+        isSparkSelected,
+        nodeDetails: [...nodeDetails, currentNodeData],
         customBoxes,
-        nodeDetails: nodeDetails.map((node) => ({
-          ...node,
-          haComponents: isHaSelected ? haComponents : null, // Inclure les composants HA si le cluster est de type HA
-        })),
+        remote_ip: "192.168.0.27",
+        remote_user: "User",
+        remote_password: "amiria123",
+        mail: "amiriaayoub@gmail.com"
       };
-      // Enregistrer l'essai dans localStorage (premier enregistrement)
-  const savedAttempts = JSON.parse(localStorage.getItem("clusterAttempts")) || [];
-  savedAttempts.push(clusterData);
-  localStorage.setItem("clusterAttempts", JSON.stringify(savedAttempts));
 
-  // Envoyer les données au serveur (optionnel)
-  fetch("http://localhost:5000/create_cluster", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(clusterData),
-  })
-    .then((response) => {
-      if (!response.ok) {
-        throw new Error("Erreur lors de la création du cluster");
+      let endpoint = "";
+      if (isHaSelected) {
+        endpoint = isSparkSelected
+          ? "http://localhost:5000/create-cluster-HA-spark-remote"
+          : "http://localhost:5000/create-cluster-HA-remote";
+      } else {
+        endpoint = "http://localhost:5000/create-cluster-remote";
       }
-      return response.json();
-    })
-    .then((data) => {
-      console.log("Cluster créé:", data);
-      navigate("/ClusterDashVir", { state: clusterData });
-    })
-    .catch((error) => {
-      console.error("Erreur:", error);
-      navigate("/ClusterDashVir", { state: clusterData });
-    });
-};
+
+      fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(clusterData),
+      })
+        .then((response) => {
+          if (!response.ok)
+            throw new Error("Erreur lors de la création du cluster");
+          return response.json();
+        })
+        .then((data) => {
+          console.log("Cluster créé:", data);
+          navigate("/ClusterDashVir", { state: data });
+        })
+        .catch((error) => {
+          console.error("Erreur:", error);
+          alert("Une erreur s'est produite lors de la création du cluster.");
+        });
+    }
   };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-teal-100 to-white p-4">
       <div className="absolute top-4 right-4">
         <button
-          onClick={handleDashboardClick}
+          onClick={() => navigate("/ClusterDashVir")}
           className="bg-teal-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-teal-600"
         >
           Dashboard
         </button>
       </div>
       <h1 className="text-4xl font-bold text-teal-600 mb-6">Cluster Form</h1>
-
       <form onSubmit={handleSubmit} className="bg-white p-6 rounded-lg shadow-lg w-96">
+        <h2 className="text-xl font-semibold mb-4">
+          Node {currentNodeIndex + 1} / {nodeCount}
+        </h2>
         <label className="block text-sm font-medium mb-2">Host Name:</label>
         <input
           type="text"
-          value={nodeDetails[currentNode].hostname}
-          onChange={(e) => handleNodeDetailsChange("hostname", e.target.value)}
+          value={currentNodeData.hostname}
+          onChange={(e) => handleFieldChange("hostname", e.target.value)}
+          placeholder="Enter host name"
           className="w-full p-2 border rounded mb-4"
-          placeholder={`Enter host name ${currentNode + 1}`}
           required
         />
 
-<OSVersionSelect
-          value={nodeDetails[currentNode].osVersion}
-          onChange={(value) => handleNodeDetailsChange("osVersion", value)}
+        <OSVersionSelect
+          value={currentNodeData.osVersion}
+          onChange={(value) => handleFieldChange("osVersion", value)}
           onCustomBoxSelect={setIsCustomBoxOpen}
-          options={osOptions} // Passer la liste des options dynamiques
+          options={osOptions}
         />
+
         {isCustomBoxOpen && (
-            <CustomBox
+          <CustomBox
+            ram={customRam}
+            cpu={customCpu}
+            onRamChange={setCustomRam}
+            onCpuChange={setCustomCpu}
+            onClose={() => setIsCustomBoxOpen(false)}
+            onAddBox={handleAddCustomBox}
+          />
+        )}
 
-              onClose={() => setIsCustomBoxOpen(false)}
-              onAddBox={handleAddCustomBox} // Assurez-vous que c'est bien passé ici
-            />
-          )}
-
-      <label className="block text-sm font-medium">RAM: {nodeDetails[currentNode].ram} GB</label>
+        <label className="block text-sm font-medium">
+          RAM: {currentNodeData.ram} GB
+        </label>
         <input
           type="range"
           min="2"
           max="16"
           step="2"
-          value={nodeDetails[currentNode].ram}
-          onChange={(e) => handleNodeDetailsChange("ram", Number(e.target.value))}
+          value={currentNodeData.ram}
+          onChange={(e) => handleFieldChange("ram", Number(e.target.value))}
           className="w-full mb-4"
         />
 
-        <label className="block text-sm font-medium">CPU: {nodeDetails[currentNode].cpu} vCPUs</label>
+        <label className="block text-sm font-medium">
+          CPU: {currentNodeData.cpu} vCPUs
+        </label>
         <input
           type="range"
           min="1"
           max="8"
           step="1"
-          value={nodeDetails[currentNode].cpu}
-          onChange={(e) => handleNodeDetailsChange("cpu", Number(e.target.value))}
+          value={currentNodeData.cpu}
+          onChange={(e) => handleFieldChange("cpu", Number(e.target.value))}
           className="w-full mb-4"
         />
 
         <label className="block text-sm font-medium mb-2">IP:</label>
         <input
           type="text"
-          value={nodeDetails[currentNode].ip}
-          onChange={(e) => handleNodeDetailsChange("ip", e.target.value)}
+          value={currentNodeData.ip}
+          onChange={(e) => handleFieldChange("ip", e.target.value)}
+          placeholder="Enter IP address"
           className="w-full p-2 border rounded mb-4"
-          placeholder={`IP address for node ${currentNode + 1}`}
           required
         />
 
-        <label className="block text-sm font-medium mb-2">Node Description:</label>
+        <label className="block text-sm font-medium mb-2">
+          Node Description:
+        </label>
         <input
           type="text"
-          value={nodeDetails[currentNode].nodeDescription}
-          onChange={(e) => handleNodeDetailsChange("nodeDescription", e.target.value)}
+          value={currentNodeData.nodeDescription}
+          onChange={(e) => handleFieldChange("nodeDescription", e.target.value)}
+          placeholder="Enter node description"
           className="w-full p-2 border rounded mb-4"
-          placeholder={`Enter node ${currentNode + 1} description`}
         />
 
         <div className="mb-4">
           <label className="inline-flex items-center">
             <input
               type="checkbox"
-              checked={nodeDetails[currentNode].isNameNode}
-              onChange={(e) => handleNodeDetailsChange("isNameNode", e.target.checked)}
+              checked={currentNodeData.isNameNode}
+              onChange={(e) => handleFieldChange("isNameNode", e.target.checked)}
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Name Node</span>
@@ -235,8 +262,8 @@ const [customBoxes, setCustomBoxes] = useState(() => {
           <label className="inline-flex items-center ml-4">
             <input
               type="checkbox"
-              checked={nodeDetails[currentNode].isResourceManager}
-              onChange={(e) => handleNodeDetailsChange("isResourceManager", e.target.checked)}
+              checked={currentNodeData.isResourceManager}
+              onChange={(e) => handleFieldChange("isResourceManager", e.target.checked)}
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Resource Manager</span>
@@ -244,53 +271,76 @@ const [customBoxes, setCustomBoxes] = useState(() => {
           <label className="inline-flex items-center ml-4">
             <input
               type="checkbox"
-              checked={nodeDetails[currentNode].isDataNode}
-              onChange={(e) => handleNodeDetailsChange("isDataNode", e.target.checked)}
+              checked={currentNodeData.isDataNode}
+              onChange={(e) => handleFieldChange("isDataNode", e.target.checked)}
               className="form-checkbox h-5 w-5 text-teal-600"
             />
             <span className="ml-2 text-gray-700">Data Node</span>
           </label>
         </div>
+
         {isHaSelected && (
-  <div className="mb-4">
-    <label className="inline-flex items-center">
-      <input
-        type="checkbox"
-        checked={haComponents.isZookeeper}
-        onChange={(e) => setHaComponents({ ...haComponents, isZookeeper: e.target.checked })}
-        className="form-checkbox h-5 w-5 text-teal-600"
-      />
-      <span className="ml-2 text-gray-700">Zookeeper</span>
-    </label>
-    <label className="inline-flex items-center ml-4">
-      <input
-        type="checkbox"
-        checked={haComponents.isNamenodeStandby}
-        onChange={(e) => setHaComponents({ ...haComponents, isNamenodeStandby: e.target.checked })}
-        className="form-checkbox h-5 w-5 text-teal-600"
-      />
-      <span className="ml-2 text-gray-700">Namenode Standby</span>
-    </label>
-    <label className="inline-flex items-center ml-4">
-      <input
-        type="checkbox"
-        checked={haComponents.isResourceManagerStandby}
-        onChange={(e) => setHaComponents({ ...haComponents, isResourceManagerStandby: e.target.checked })}
-        className="form-checkbox h-5 w-5 text-teal-600"
-      />
-      <span className="ml-2 text-gray-700">Resource Manager Standby</span>
-    </label>
-  </div>
-  
-)}
+          <div className="mb-4">
+            <label className="inline-flex items-center">
+              <input
+                type="checkbox"
+                checked={currentNodeData.isNameNodeStandby || false}
+                onChange={(e) => handleFieldChange("isNameNodeStandby", e.target.checked)}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">NameNode Standby</span>
+            </label>
+            <label className="inline-flex items-center ml-4">
+              <input
+                type="checkbox"
+                checked={currentNodeData.isResourceManagerStandby || false}
+                onChange={(e) => handleFieldChange("isResourceManagerStandby", e.target.checked)}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Resource Manager Standby</span>
+            </label>
+            <label className="inline-flex items-center ml-4">
+              <input
+                type="checkbox"
+                checked={currentNodeData.isZookeeper || false}
+                onChange={(e) => handleFieldChange("isZookeeper", e.target.checked)}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Zookeeper</span>
+            </label>
+            <label className="inline-flex items-center ml-4">
+              <input
+                type="checkbox"
+                checked={currentNodeData.isJournalNode || false}
+                onChange={(e) => handleFieldChange("isJournalNode", e.target.checked)}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Journal Node</span>
+            </label>
+          </div>
+        )}
+
+        {isSparkSelected && (
+          <div className="mb-4">
+            <label className="inline-flex items-center">
+              <input
+                type="checkbox"
+                checked={currentNodeData.isSparkNode || false}
+                onChange={(e) => handleFieldChange("isSparkNode", e.target.checked)}
+                className="form-checkbox h-5 w-5 text-teal-600"
+              />
+              <span className="ml-2 text-gray-700">Spark Node</span>
+            </label>
+          </div>
+        )}
+
         <button
           type="submit"
           className="w-full bg-teal-500 text-white p-2 rounded-lg shadow-md hover:bg-teal-600"
         >
-          {currentNode < nodeCount - 1 ? "Next" : "Submit Cluster"}
+          Submit Cluster
         </button>
       </form>
     </div>
-    
   );
 }

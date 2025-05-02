@@ -2,36 +2,37 @@ import React, { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import OSVersionSelect from './OSVersionSelect'; // Assurez-vous d'importer le composant
 import CustomBox from './CustomBox'; 
+
 export default function FormulaireVir() {
   const [hostname, setHostname] = useState("");
-  const [osVersion, setOsVersion] = useState("ubuntu/trusty64");
   const [ram, setRam] = useState(2);
   const [customBoxes, setCustomBoxes] = useState(() => {
     // Récupérer les boxes personnalisées depuis localStorage
     const savedBoxes = localStorage.getItem("customBoxes");
     return savedBoxes ? JSON.parse(savedBoxes) : []; // Si aucune box n'est trouvée, retourner un tableau vide
-  });  const [totalMemoryGB, setMaxRam] = useState(16);
+  });
+  const [totalMemoryGB, setMaxRam] = useState(16);
   const [cpu, setCpu] = useState(1);
   const [maxCpu, setMaxCpu] = useState(8);
   const [network, setNetwork] = useState("NAT");
   const [submitted, setSubmitted] = useState(false);
   const [ipAddress, setIpAddress] = useState("");
   const [port, setPort] = useState("");
-
+  const [osVersion, setOsVersion] = useState("ubuntu/trusty64");
   const navigate = useNavigate();
   const location = useLocation();
   const [isCustomBoxOpen, setIsCustomBoxOpen] = useState(false);
-
+  const [customRam, setCustomRam] = useState(4);
+  const [customCpu, setCustomCpu] = useState(2);
   const [osOptions, setOsOptions] = useState(() => {
     const savedOptions = localStorage.getItem("osOptions");
     return savedOptions ? JSON.parse(savedOptions) : ["ubuntu/trusty64", "ubuntu-focal", "ubuntu-bionic"];
   });
-  
+
   const remoteConfig = location.state || {};
   const isRemote = remoteConfig.mode === "distant";
 
   useEffect(() => {
-    
     if (!isRemote) {
       fetch("http://localhost:5000/get-cpu-info")
         .then((res) => res.json())
@@ -66,19 +67,20 @@ export default function FormulaireVir() {
         ); }
       
   }, [isRemote]);
-  
+
+
   useEffect(() => {
     const handleStorageChange = (e) => {
       if (e.key === "osOptions") {
         setOsOptions(JSON.parse(e.newValue));
       }
     };
-  
+
     window.addEventListener("storage", handleStorageChange);
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
-  
+
   const handleNodeDetailsChange = (field, value) => {
     if (field === "osVersion") {
       setOsVersion(value);
@@ -92,19 +94,15 @@ export default function FormulaireVir() {
   const handleAddCustomBox = ({ name, ram, cpu }) => {
     const updatedBoxes = [...customBoxes, { name, ram, cpu }];
     const updatedOptions = [...osOptions, name];
-  
+
     setCustomBoxes(updatedBoxes);
     setOsOptions(updatedOptions);
-  
+
     // Mettre à jour localStorage
     localStorage.setItem("customBoxes", JSON.stringify(updatedBoxes));
     localStorage.setItem("osOptions", JSON.stringify(updatedOptions));
   };
-  
-  
-  const handleDashboardClick = () => {
-    navigate("/Dashboard");
-  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -115,11 +113,11 @@ export default function FormulaireVir() {
 
     const requestData = {
       vm_name: hostname,
+      box: osVersion,
       ram: ram,
       cpu: cpu,
       network: network,
       customBoxes: customBoxes,
-    
     };
 
     if (isRemote) {
@@ -140,7 +138,6 @@ export default function FormulaireVir() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestData),
       });
-      
       const data = await response.json();
 
       if (response.ok) {
@@ -150,6 +147,7 @@ export default function FormulaireVir() {
 
         const newMachine = {
           hostname: hostname,
+          box: osVersion,
           network: network,
           ram: `${ram} GB`,
           cpu: `${cpu} vCPUs`,
@@ -177,7 +175,7 @@ export default function FormulaireVir() {
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-teal-100 to-white p-4">
       <div className="absolute top-4 right-4">
         <button
-          onClick={handleDashboardClick}
+          onClick={() => navigate("/dashboard")}
           className="bg-teal-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-teal-600"
         >
           Dashboard
@@ -197,19 +195,24 @@ export default function FormulaireVir() {
             className="w-full p-2 border rounded mb-4"
             required
           />
+          <OSVersionSelect
+            value={osVersion}
+            onChange={(value) => handleNodeDetailsChange("osVersion", value)}
+            onCustomBoxSelect={setIsCustomBoxOpen}
+            options={osOptions}
+          />
+          {isCustomBoxOpen && (
+            <CustomBox
+              ram={customRam}
+              cpu={customCpu}
+              onRamChange={setCustomRam}
+              onCpuChange={setCustomCpu}
+              onClose={() => setIsCustomBoxOpen(false)}
+              onAddBox={handleAddCustomBox}
+            />
+          )}
 
-<OSVersionSelect
-        value={osVersion}
-        onChange={(value) => handleNodeDetailsChange("osVersion", value)}
-        onCustomBoxSelect={setIsCustomBoxOpen}
-        options={osOptions}
-      />
-      {isCustomBoxOpen && (
-        <CustomBox
-          onClose={() => setIsCustomBoxOpen(false)}
-          onAddBox={handleAddCustomBox}
-        />
-      )}
+        
 
           <label className="block text-sm font-medium">RAM: {ram} GB</label>
           <input
